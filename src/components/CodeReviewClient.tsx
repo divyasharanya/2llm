@@ -72,7 +72,7 @@ export default function CodeReviewClient() {
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model: "llama-3.1-8b-instant", messages: [{ role: "user", content: prompt }], max_tokens: 4000 }),
+      body: JSON.stringify({ model: "llama-3.1-8b-instant", messages: [{ role: "user", content: prompt }], max_tokens: 8000 }),
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error?.message || "API error");
@@ -129,8 +129,8 @@ export default function CodeReviewClient() {
     // Gemini analysis
     setCurrentRound(1);
     const geminiResp = await callGemini(`You are a senior code analyst. Return ONLY valid JSON array: [{"file":"x.py","line":1,"severity":"CRITICAL|WARNING|SUGGESTION","description":"issue"}]. If no issues, return [].\n${code}`).catch((err) => {
-      console.error("Gemini error:", err);
-      return "ERROR: " + (err.message || "Unknown error");
+      console.error("Gemini error:", err.message);
+      return "Analysis temporarily unavailable - Gemini quota exceeded";
     });
     setGeminiInfo(geminiResp);
 
@@ -156,10 +156,12 @@ export default function CodeReviewClient() {
 
     // LLaMA fixed code
     setCurrentRound(2);
-    const llamaResp = await callGroq(`Fix all bugs in this code. Return only code in markdown block:\n\n${code}`).catch((err) => {
-      console.error("Groq error:", err);
-      return "ERROR: " + (err.message || "Unknown error");
-    });
+    let llamaResp = "";
+    try {
+      llamaResp = await callGroq(`Fix all bugs in this code. Return only code in markdown block:\n\n${code}`);
+    } catch (err: any) {
+      llamaResp = `Error: ${err.message || "Unknown error"}`;
+    }
     const fixedMatch = llamaResp.match(/```[\w]*\n([\s\S]*?)\n```/);
     setLlamaFixedCode(fixedMatch ? fixedMatch[1] : llamaResp);
 
