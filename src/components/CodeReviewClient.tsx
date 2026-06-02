@@ -37,36 +37,58 @@ export default function CodeReviewClient() {
 
   const callGemini = async (prompt: string): Promise<string> => {
     const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || "";
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-        }),
+    if (!apiKey) {
+      throw new Error("Gemini API key not configured");
+    }
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+          }),
+        }
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error?.message || "API error");
       }
-    );
-    const data = await response.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response";
+      return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response";
+    } catch (error: any) {
+      console.error("Gemini API error:", error);
+      return `Error: ${error.message}`;
+    }
   };
 
   const callGroq = async (prompt: string): Promise<string> => {
     const apiKey = process.env.NEXT_PUBLIC_GROQ_API_KEY || "";
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "llama3-8b-8192",
-        messages: [{ role: "user", content: prompt }],
-        max_tokens: 250,
-      }),
-    });
-    const data = await response.json();
-    return data.choices?.[0]?.message?.content || "No response";
+    if (!apiKey) {
+      throw new Error("Groq API key not configured");
+    }
+    try {
+      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: "llama-3.1-8b-instant",
+          messages: [{ role: "user", content: prompt }],
+          max_tokens: 250,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error?.message || "API error");
+      }
+      return data.choices?.[0]?.message?.content || "No response";
+    } catch (error: any) {
+      console.error("Groq API error:", error);
+      return `Error: ${error.message}`;
+    }
   };
 
   const startReview = async () => {
