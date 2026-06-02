@@ -58,13 +58,12 @@ export default function DebateClient() {
         return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response";
       } catch (error: any) {
         if (attempt === retries - 1) {
-          console.error("Gemini API error:", error);
-          return `Error: ${error.message}`;
+          throw error;
         }
         await sleep(1000 * (attempt + 1));
       }
     }
-    return "No response";
+    throw new Error("Max retries exceeded");
   };
 
   const callGroq = async (prompt: string): Promise<string> => {
@@ -72,33 +71,28 @@ export default function DebateClient() {
     if (!apiKey) {
       throw new Error("Groq API key not configured");
     }
-    try {
-      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: "llama-3.1-8b-instant",
-          messages: [{ role: "user", content: prompt }],
-          max_tokens: 200,
-        }),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error?.message || "API error");
-      }
-      return data.choices?.[0]?.message?.content || "No response";
-    } catch (error: any) {
-      console.error("Groq API error:", error);
-      return `Error: ${error.message}`;
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "llama-3.1-8b-instant",
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 200,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error?.message || "API error");
     }
+    return data.choices?.[0]?.message?.content || "No response";
   };
 
   const startDebate = async () => {
     if (!topic.trim()) return;
-    
+
     setIsDebating(true);
     setCurrentRound(0);
     setForArguments([]);
@@ -109,19 +103,20 @@ export default function DebateClient() {
     for (let i = 1; i <= rounds; i++) {
       setCurrentRound(i);
 
-      const forPrompt = `You are a sharp debater arguing STRONGLY IN FAVOUR of: ${topic}. Give 2-3 concrete arguments. Be assertive and logical. Max 120 words.`;
-      const againstPrompt = `You are a critical debater arguing STRONGLY AGAINST: ${topic}. Rebut: ${forArguments[i - 2]?.text || "None"}. Give 2-3 counter-arguments. Max 120 words.`;
+      const forPrompt = `You are Gemini, a sharp debater arguing STRONGLY IN FAVOUR of: "${topic}". Give 2-3 concrete arguments. Be assertive and logical. Max 120 words.`;
+      const againstPrompt = `You are LLaMA, a critical debater arguing STRONGLY AGAINST: "${topic}". Rebut the FOR side and give 2-3 counter-arguments. Max 120 words.`;
 
-      const forResponse = await callGemini(forPrompt);
-      const againstResponse = await callGroq(againstPrompt);
+      const forResponse = await callGemini(forPrompt).catch(() => "");
+      const againstResponse = await callGroq(againstPrompt).catch(() => "");
 
-      setForArguments((prev) => [...prev, { round: i, text: forResponse }]);
-      setAgainstArguments((prev) => [...prev, { round: i, text: againstResponse }]);
+      setForArguments((prev) => [...prev, { round: i, text: forResponse || "Analysis unavailable" }]);
+      setAgainstArguments((prev) => [...prev, { round: i, text: againstResponse || "Analysis unavailable" }]);
     }
 
-    const judgePrompt = `Summarize both sides of "${topic}". Pick stronger argument. Give 3 research takeaways. Max 150 words. FOR: ${forArguments.map(a => a.text).join(" ")}. AGAINST: ${againstArguments.map(a => a.text).join(" ")}`;
-    const judgeResponse = await callGemini(judgePrompt);
-    setVerdict(judgeResponse);
+    const judgePrompt = `You are Gemini, an impartial judge. Summarize both sides of "${topic}", pick the stronger argument, and give 3 research takeaways. Max 150 words. FOR: ${forArguments.map(a => a.text).join(" ")}. AGAINST: ${againstArguments.map(a => a.text).join(" ")}`;
+    const judgeResponse = await callGemini(judgePrompt).catch(() => "");
+    const finalVerdict = judgeResponse || "Verdict unavailable due to API limits";
+    setVerdict(finalVerdict);
     setDebateComplete(true);
     setIsDebating(false);
 
@@ -129,8 +124,8 @@ export default function DebateClient() {
       topic,
       language,
       rounds,
-      arguments: { for: forArguments, against: againstArguments },
-      verdict: judgeResponse,
+      arguments: { for: [...forArguments], against: [...againstArguments] },
+      verdict: finalVerdict,
       timestamp: new Date().toISOString(),
     };
     const stored = localStorage.getItem("debateHistory") || "[]";
@@ -142,7 +137,7 @@ export default function DebateClient() {
   const exportPDF = () => {
     const doc = new jsPDF();
     doc.setFontSize(16);
-    doc.text(`AI Debate: ${topic}`, 20, 20);
+    doc.text(`AI Debate Arena - ${topic}`, 20, 20);
     doc.setFontSize(12);
     let y = 30;
     forArguments.forEach((arg) => {
@@ -176,13 +171,13 @@ export default function DebateClient() {
   };
 
   return (
-    <div className="flex-1 flex flex-col items-center p-6 bg-black min-h-screen">
-      <div className="w-full max-w-4xl flex flex-col gap-4 mb-6">
+    <div className="flex-1 flex flex-col items-center p-8 bg-gradient-to-br from-gray-950 to-black min-h-screen">
+      <div className="w-full max-w-5xl flex flex-col gap-6 mb-8">
         <div className="flex gap-4">
           <select
             value={language}
             onChange={(e) => setLanguage(e.target.value)}
-            className="bg-zinc-800 text-white px-4 py-2 rounded-lg border border-zinc-700"
+            className="bg-gray-800 text-white px-4 py-2 rounded-lg border border-gray-700"
           >
             {languages.map((lang) => (
               <option key={lang} value={lang}>
@@ -193,7 +188,7 @@ export default function DebateClient() {
           <select
             value={rounds}
             onChange={(e) => setRounds(Number(e.target.value))}
-            className="bg-zinc-800 text-white px-4 py-2 rounded-lg border border-zinc-700"
+            className="bg-gray-800 text-white px-4 py-2 rounded-lg border border-gray-700"
           >
             {roundOptions.map((r) => (
               <option key={r} value={r}>
@@ -202,19 +197,19 @@ export default function DebateClient() {
             ))}
           </select>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-3">
           <input
             type="text"
             value={topic}
             onChange={(e) => setTopic(e.target.value)}
             placeholder="Enter debate topic..."
-            className="flex-1 bg-zinc-800 text-white px-4 py-3 rounded-lg border border-zinc-700 placeholder-zinc-500"
+            className="flex-1 bg-gray-800 text-white px-4 py-3 rounded-lg border border-gray-700 placeholder-gray-500"
             disabled={isDebating}
           />
           <button
             onClick={startDebate}
             disabled={isDebating || !topic.trim()}
-            className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-lg font-medium disabled:opacity-50"
+            className="bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white px-8 py-3 rounded-lg font-semibold disabled:opacity-50 shadow-lg"
           >
             {isDebating ? "Debating..." : "Start Debate"}
           </button>
@@ -222,49 +217,51 @@ export default function DebateClient() {
       </div>
 
       {isDebating && (
-        <div className="w-full max-w-4xl mb-4">
-          <div className="bg-zinc-800 rounded-full h-2">
+        <div className="w-full max-w-5xl mb-6">
+          <div className="bg-gray-800 rounded-full h-3 overflow-hidden">
             <div
-              className="bg-blue-500 h-2 rounded-full transition-all"
+              className="bg-gradient-to-r from-blue-500 to-blue-600 h-3 rounded-full transition-all duration-500"
               style={{ width: `${(currentRound / rounds) * 100}%` }}
             />
           </div>
-          <p className="text-zinc-400 text-sm mt-2">Round {currentRound} of {rounds}</p>
+          <p className="text-gray-400 text-sm mt-2">Round {currentRound} of {rounds}</p>
         </div>
       )}
 
-      <div ref={debateRef} className="w-full max-w-4xl grid grid-cols-1 md:grid-cols-2 gap-6">
-        <div className="bg-zinc-900 rounded-xl p-4 border border-green-500/30">
-          <div className="flex items-center justify-between mb-3">
-            <span className="bg-green-600 text-white px-3 py-1 rounded-full text-sm font-medium">
-              FOR — Gemini Flash
-            </span>
-            <span className="text-zinc-400 text-sm">
-              {forArguments.length > 0 && `Round ${forArguments[forArguments.length - 1]?.round || 0}`}
-            </span>
+      <div ref={debateRef} className="w-full max-w-5xl grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-gray-900 rounded-xl p-6 border-2 border-green-500/50 shadow-xl">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 bg-green-600 rounded-full flex items-center justify-center">
+              <span className="text-white font-bold">G</span>
+            </div>
+            <div>
+              <h3 className="text-xl font-bold text-white">Gemini 2.5 Flash</h3>
+              <p className="text-green-400 text-sm font-medium">FOR - Champion</p>
+            </div>
           </div>
-          <div className="h-64 overflow-y-auto">
+          <div className="bg-gray-950 rounded-lg p-4 h-80 overflow-y-auto">
             {forArguments.map((arg) => (
               <div key={arg.round} className="mb-3">
-                <p className="text-zinc-300 text-sm">{arg.text}</p>
+                <p className="text-gray-300 text-sm leading-relaxed">{arg.text}</p>
               </div>
             ))}
           </div>
         </div>
 
-        <div className="bg-zinc-900 rounded-xl p-4 border border-red-500/30">
-          <div className="flex items-center justify-between mb-3">
-            <span className="bg-red-600 text-white px-3 py-1 rounded-full text-sm font-medium">
-              AGAINST — LLaMA 3
-            </span>
-            <span className="text-zinc-400 text-sm">
-              {againstArguments.length > 0 && `Round ${againstArguments[againstArguments.length - 1]?.round || 0}`}
-            </span>
+        <div className="bg-gray-900 rounded-xl p-6 border-2 border-orange-500/50 shadow-xl">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 bg-orange-600 rounded-full flex items-center justify-center">
+              <span className="text-white font-bold">L</span>
+            </div>
+            <div>
+              <h3 className="text-xl font-bold text-white">LLaMA 3.1</h3>
+              <p className="text-orange-400 text-sm font-medium">AGAINST - Challenger</p>
+            </div>
           </div>
-          <div className="h-64 overflow-y-auto">
+          <div className="bg-gray-950 rounded-lg p-4 h-80 overflow-y-auto">
             {againstArguments.map((arg) => (
               <div key={arg.round} className="mb-3">
-                <p className="text-zinc-300 text-sm">{arg.text}</p>
+                <p className="text-gray-300 text-sm leading-relaxed">{arg.text}</p>
               </div>
             ))}
           </div>
@@ -272,21 +269,21 @@ export default function DebateClient() {
       </div>
 
       {debateComplete && (
-        <div className="w-full max-w-4xl mt-6">
-          <div className="bg-zinc-900 rounded-xl p-6 border border-blue-500/30">
-            <h3 className="text-xl font-bold mb-3 text-blue-400">Verdict</h3>
-            <p className="text-zinc-300">{verdict}</p>
+        <div className="w-full max-w-5xl mt-8">
+          <div className="bg-gradient-to-r from-gray-800 to-gray-900 rounded-xl p-6 border border-blue-500/50">
+            <h3 className="text-xl font-bold mb-3 text-blue-400">Verdict - Gemini Judge</h3>
+            <p className="text-gray-300 leading-relaxed">{verdict}</p>
           </div>
-          <div className="flex gap-4 mt-4">
+          <div className="flex gap-4 mt-4 justify-center">
             <button
               onClick={exportPDF}
-              className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium"
+              className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-semibold shadow-lg"
             >
               Export PDF
             </button>
             <button
               onClick={resetDebate}
-              className="bg-zinc-700 hover:bg-zinc-600 text-white px-6 py-2 rounded-lg font-medium"
+              className="bg-gray-700 hover:bg-gray-600 text-white px-6 py-2 rounded-lg font-semibold shadow-lg"
             >
               New Debate
             </button>
