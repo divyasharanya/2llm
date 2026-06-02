@@ -72,7 +72,7 @@ export default function CodeReviewClient() {
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model: "llama-3.1-8b-instant", messages: [{ role: "user", content: prompt }], max_tokens: 1200 }),
+      body: JSON.stringify({ model: "llama-3.1-8b-instant", messages: [{ role: "user", content: prompt }], max_tokens: 4000 }),
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error?.message || "API error");
@@ -128,39 +128,26 @@ export default function CodeReviewClient() {
 
     // Gemini analysis
     setCurrentRound(1);
-    const geminiResp = await callGemini(`Analyze this code. List issues with file, line, severity, description. Format: JSON array or plain text.\n\n${code}`).catch(() => "");
+    const geminiResp = await callGemini(`You are a senior code analyst. Return ONLY valid JSON array: [{"file":"x.py","line":1,"severity":"CRITICAL|WARNING|SUGGESTION","description":"issue"}]. If no issues, return [].\n${code}`).catch(() => "");
     setGeminiInfo(geminiResp || "Analysis unavailable");
 
     // Parse issues
-    const parsedIssues: Issue[] = [];
+    let parsedIssues: Issue[] = [];
     try {
       const clean = geminiResp.replace(/```json|```/g, "").trim();
       if (clean.startsWith("[")) {
         const arr = JSON.parse(clean);
         if (Array.isArray(arr)) {
-          arr.forEach((t: any) => parsedIssues.push({
+          parsedIssues = arr.map((t: any) => ({
             file: t.file || "unknown",
             line: parseInt(t.line) || 1,
-            severity: t.severity?.toUpperCase() as any || "WARNING",
-            description: t.title || t.description || "Issue"
+            severity: (t.severity?.toUpperCase() || "WARNING") as Issue["severity"],
+            description: t.description || t.title || "Issue"
           }));
         }
       }
-    } catch {
-      // Text fallback
-      geminiResp.split("\n").forEach((ln) => {
-        const f = ln.match(/\[FILE:[^\]]+\]/i);
-        const l = ln.match(/\[LINE:(\d+)\]/i);
-        const s = ln.match(/\[SEVERITY:(\w+)\]/i);
-        if (f && l && s) {
-          parsedIssues.push({
-            file: f[0].replace(/\[FILE:|\]/gi, "").trim(),
-            line: parseInt(l[1]),
-            severity: s[1].toUpperCase() as any,
-            description: ln.replace(/\[FILE:[^\]]+\]|\[LINE:[\d]+\]|\[SEVERITY:[\w]+\]/gi, "").trim() || "Issue"
-          });
-        }
-      });
+    } catch (e) {
+      console.log("Parse error:", e);
     }
     setIssues(parsedIssues);
 
@@ -226,9 +213,9 @@ export default function CodeReviewClient() {
         )}
 
         {inputMode === "file" && (
-          <div className="border-2 border-dashed border-gray-600 rounded-lg p-4 w-full text-center">
+          <div className="border-2 border-dashed border-gray-500 rounded-lg p-4 w-full text-center hover:border-green-500 transition-colors">
             <input type="file" accept=".py,.js,.ts,.jsx,.tsx,.java,.cpp,.c,.go,.rs" onChange={handleFileUpload} className="hidden" id="file-input" />
-            <label htmlFor="file-input" className="cursor-pointer text-gray-400">📄 Upload file</label>
+            <label htmlFor="file-input" className="cursor-pointer text-gray-400 hover:text-green-400">📄 Upload file</label>
           </div>
         )}
 
@@ -268,7 +255,7 @@ export default function CodeReviewClient() {
           <div className="bg-gray-900 rounded-xl p-4">
             <div className="flex justify-between items-center mb-2">
               <h3 className="text-orange-400 font-bold">LLaMA Fixed Code</h3>
-              {llamaFixedCode && <button onClick={downloadAll} className="text-green-400 text-xs">Download</button>}
+              {llamaFixedCode && <button onClick={downloadAll} className="text-green-400 hover:text-green-300 text-xs">Download</button>}
             </div>
             {llamaFixedCode && (
               <SyntaxHighlighter language={language} style={vscDarkPlus} className="text-xs max-h-64 overflow-y-auto rounded">
