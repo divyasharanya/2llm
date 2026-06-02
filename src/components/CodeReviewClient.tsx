@@ -128,7 +128,10 @@ export default function CodeReviewClient() {
 
     // Gemini analysis
     setCurrentRound(1);
-    const geminiResp = await callGemini(`You are a senior code analyst. Return ONLY valid JSON array: [{"file":"x.py","line":1,"severity":"CRITICAL|WARNING|SUGGESTION","description":"issue"}]. If no issues, return [].\n${code}`).catch(() => "");
+    const geminiResp = await callGemini(`You are a senior code analyst. Return ONLY valid JSON array: [{"file":"x.py","line":1,"severity":"CRITICAL|WARNING|SUGGESTION","description":"issue"}]. If no issues, return [].\n${code}`).catch((err) => {
+      console.error("Gemini error:", err);
+      return "API ERROR: " + err.message;
+    });
     setGeminiInfo(geminiResp || "Analysis unavailable");
 
     // Parse issues
@@ -153,7 +156,10 @@ export default function CodeReviewClient() {
 
     // LLaMA fixed code
     setCurrentRound(2);
-    const llamaResp = await callGroq(`Fix all bugs in this code. Return only code in markdown block:\n\n${code}`).catch(() => "");
+    const llamaResp = await callGroq(`Fix all bugs in this code. Return only code in markdown block:\n\n${code}`).catch((err) => {
+      console.error("Groq error:", err);
+      return "API ERROR: " + err.message;
+    });
     const fixedMatch = llamaResp.match(/```[\w]*\n([\s\S]*?)\n```/);
     setLlamaFixedCode(fixedMatch ? fixedMatch[1] : llamaResp || "Fix unavailable");
 
