@@ -35,31 +35,39 @@ export default function CodeReviewClient() {
 
   const languages = ["python", "javascript", "typescript", "java", "cpp"];
 
-  const callGemini = async (prompt: string): Promise<string> => {
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+  const callGemini = async (prompt: string, retries = 3): Promise<string> => {
     const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || "";
     if (!apiKey) {
       throw new Error("Gemini API key not configured");
     }
-    try {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ role: "user", parts: [{ text: prompt }] }],
-          }),
+    for (let attempt = 0; attempt < retries; attempt++) {
+      try {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{ role: "user", parts: [{ text: prompt }] }],
+            }),
+          }
+        );
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error?.message || "API error");
         }
-      );
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error?.message || "API error");
+        return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response";
+      } catch (error: any) {
+        if (attempt === retries - 1) {
+          console.error("Gemini API error:", error);
+          return `Error: ${error.message}`;
+        }
+        await sleep(1000 * (attempt + 1));
       }
-      return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response";
-    } catch (error: any) {
-      console.error("Gemini API error:", error);
-      return `Error: ${error.message}`;
     }
+    return "No response";
   };
 
   const callGroq = async (prompt: string): Promise<string> => {
@@ -77,7 +85,7 @@ export default function CodeReviewClient() {
         body: JSON.stringify({
           model: "llama-3.1-8b-instant",
           messages: [{ role: "user", content: prompt }],
-          max_tokens: 250,
+          max_tokens: 500,
         }),
       });
       const data = await response.json();
@@ -109,12 +117,21 @@ export default function CodeReviewClient() {
     const attackerResponse1 = await callGroq(attackerPrompt1);
     setAttackerRounds([{ round: 1, code: "", explanation: attackerResponse1 }]);
 
-    // Round 2: Builder fixes issues
+    // Round 2: Builder fixes issues (using Gemini)
     setCurrentRound(2);
-    const builderPrompt = `You are a senior software engineer. Write clean, efficient, well-commented code fixing the issues found. ${mode === "describe" ? "Task: " : "Fix this code: "}${input}. Issues found: ${attackerResponse1}`;
+    const builderPrompt = mode === "describe" 
+      ? `You are a senior software engineer. Write clean, efficient, well-commented code for: ${input}. Only return the code in a markdown block. No explanation.`
+      : `You are a senior software engineer. Fix this code and return ONLY the corrected code in a markdown block:\n\n${input}\n\nReturn only the fixed code.`;
     const builderResponse = await callGemini(builderPrompt);
-    const codeMatch = builderResponse.match(/```[\w]*\n([\s\S]*?)\n```/);
-    fixedCode = codeMatch ? codeMatch[1] : builderResponse;
+    const codeMatch = builderResponse.match(/```\w*\n([\s\S]*?)\n```/);
+    if (codeMatch && codeMatch[1]) {
+      fixedCode = codeMatch[1];
+    } else if (builderResponse.includes("Error:")) {
+      const fallbackResponse = await callGroq(`Write clean code without explanation: ${input}`);
+      fixedCode = fallbackResponse;
+    } else {
+      fixedCode = builderResponse;
+    }
     setCleanCode(fixedCode);
     setBuilderRounds([{ round: 2, code: fixedCode, explanation: builderResponse }]);
 
@@ -123,11 +140,17 @@ export default function CodeReviewClient() {
     const attackerResponse2 = await callGroq(attackerPrompt2);
     setAttackerRounds((prev) => [...prev, { round: 2, code: "", explanation: attackerResponse2 }]);
 
-    // Judge scoring
-    const judgePrompt = `Review the original and fixed code. Give a quality score out of 10. List what was improved. Max 100 words. Original: ${originalCode}. Fixed: ${fixedCode}`;
+    // Judge scoring (using Gemini with fallback)
+    const judgePrompt = `You are an impartial judge. Review the original and fixed code, give a quality score out of 10, and list improvements. Max 100 words. Original: ${originalCode}. Fixed: ${fixedCode}`;
     const judgeResponse = await callGemini(judgePrompt);
-    const scoreMatch = judgeResponse.match(/(\d+)\/10/);
-    setScore(scoreMatch ? Number(scoreMatch[1]) : 7);
+    if (judgeResponse.includes("Error:")) {
+      const fallbackJudge = await callGroq(`Score code quality 1-10 and list improvements. Original: ${originalCode}. Fixed: ${fixedCode}`);
+      const fallbackScoreMatch = fallbackJudge.match(/(\d+)\/10/);
+      setScore(fallbackScoreMatch ? Number(fallbackScoreMatch[1]) : 7);
+    } else {
+      const scoreMatch = judgeResponse.match(/(\d+)\/10/);
+      setScore(scoreMatch ? Number(scoreMatch[1]) : 7);
+    }
 
     setReviewComplete(true);
     setIsReviewing(false);

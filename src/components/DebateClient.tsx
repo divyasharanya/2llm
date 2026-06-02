@@ -32,31 +32,39 @@ export default function DebateClient() {
   const languages = ["English", "Hindi", "Telugu"];
   const roundOptions = [2, 3, 4];
 
-  const callGemini = async (prompt: string): Promise<string> => {
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+  const callGemini = async (prompt: string, retries = 3): Promise<string> => {
     const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || "";
     if (!apiKey) {
       throw new Error("Gemini API key not configured");
     }
-    try {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ role: "user", parts: [{ text: prompt }] }],
-          }),
+    for (let attempt = 0; attempt < retries; attempt++) {
+      try {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{ role: "user", parts: [{ text: prompt }] }],
+            }),
+          }
+        );
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error?.message || "API error");
         }
-      );
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error?.message || "API error");
+        return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response";
+      } catch (error: any) {
+        if (attempt === retries - 1) {
+          console.error("Gemini API error:", error);
+          return `Error: ${error.message}`;
+        }
+        await sleep(1000 * (attempt + 1));
       }
-      return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response";
-    } catch (error: any) {
-      console.error("Gemini API error:", error);
-      return `Error: ${error.message}`;
     }
+    return "No response";
   };
 
   const callGroq = async (prompt: string): Promise<string> => {
@@ -101,8 +109,8 @@ export default function DebateClient() {
     for (let i = 1; i <= rounds; i++) {
       setCurrentRound(i);
 
-      const forPrompt = `You are a sharp debater arguing STRONGLY IN FAVOUR of the topic. Give 2-3 concrete arguments per round. Be assertive and logical. Max 120 words. Topic: ${topic}. Round: ${i}/${rounds}`;
-      const againstPrompt = `You are a critical debater arguing STRONGLY AGAINST the topic. Directly rebut previous arguments. Give 2-3 counter-arguments. Max 120 words. Topic: ${topic}. Previous FOR argument: ${forArguments[i - 2]?.text || "None"}. Round: ${i}/${rounds}`;
+      const forPrompt = `You are a sharp debater arguing STRONGLY IN FAVOUR of: ${topic}. Give 2-3 concrete arguments. Be assertive and logical. Max 120 words.`;
+      const againstPrompt = `You are a critical debater arguing STRONGLY AGAINST: ${topic}. Rebut: ${forArguments[i - 2]?.text || "None"}. Give 2-3 counter-arguments. Max 120 words.`;
 
       const forResponse = await callGemini(forPrompt);
       const againstResponse = await callGroq(againstPrompt);
@@ -111,7 +119,7 @@ export default function DebateClient() {
       setAgainstArguments((prev) => [...prev, { round: i, text: againstResponse }]);
     }
 
-    const judgePrompt = `You are an impartial judge. Summarize both sides, pick the stronger argument, give 3 research takeaways. Max 150 words. Topic: ${topic}. FOR arguments: ${forArguments.map(a => a.text).join(" ")}. AGAINST arguments: ${againstArguments.map(a => a.text).join(" ")}`;
+    const judgePrompt = `Summarize both sides of "${topic}". Pick stronger argument. Give 3 research takeaways. Max 150 words. FOR: ${forArguments.map(a => a.text).join(" ")}. AGAINST: ${againstArguments.map(a => a.text).join(" ")}`;
     const judgeResponse = await callGemini(judgePrompt);
     setVerdict(judgeResponse);
     setDebateComplete(true);
