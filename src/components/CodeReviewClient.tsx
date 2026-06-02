@@ -10,7 +10,6 @@ interface FileNode {
   path: string;
   content: string;
   type: "file" | "folder";
-  children?: FileNode[];
 }
 
 interface Issue {
@@ -21,32 +20,10 @@ interface Issue {
   fix?: string;
 }
 
-interface ReviewHistory {
-  files: FileNode[];
-  framework: string;
-  issues: Issue[];
-  score: number;
-  timestamp: string;
-}
-
 const fileExtensionMap: { [key: string]: string } = {
   py: "python", js: "javascript", ts: "typescript", jsx: "javascript", tsx: "typescript",
   java: "java", cpp: "cpp", c: "cpp", go: "go", rs: "rust",
 };
-
-const frameworkPatterns: { [key: string]: RegExp } = {
-  react: /react|jsx|tsx/i,
-  nextjs: /next\.config|pages\/|app\/router/i,
-  django: /django|settings\.py|views\.py/i,
-  express: /express|require\(|import express/i,
-};
-
-const secretPatterns = [
-  /api[_-]?key\s*[:=]\s*['"][\w-]+/i,
-  /password\s*[:=]\s*['"][\w-]+/i,
-  /secret\s*[:=]\s*['"][\w-]+/i,
-  /token\s*[:=]\s*['"][\w-]+/i,
-];
 
 export default function CodeReviewClient() {
   const [inputMode, setInputMode] = useState<"paste" | "file" | "folder">("paste");
@@ -56,57 +33,14 @@ export default function CodeReviewClient() {
   const [selectedFile, setSelectedFile] = useState<FileNode | null>(null);
   const [currentRound, setCurrentRound] = useState(0);
   const [isReviewing, setIsReviewing] = useState(false);
+  const [geminiInfo, setGeminiInfo] = useState("");
+  const [llamaFixedCode, setLlamaFixedCode] = useState("");
   const [issues, setIssues] = useState<Issue[]>([]);
   const [score, setScore] = useState(0);
-  const [framework, setFramework] = useState("");
   const [scanProgress, setScanProgress] = useState("");
-  const [fixedFiles, setFixedFiles] = useState<{ [path: string]: string }>({});
   const reviewRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (input && !language) detectLanguage();
-  }, [input]);
-
-  const detectLanguage = () => {
-    for (const [lang, pattern] of Object.entries(frameworkPatterns)) {
-      if (pattern.test(input)) {
-        if (lang === "nextjs") setFramework("Next.js");
-        else if (lang === "react") setFramework("React");
-        else if (lang === "django") setFramework("Django");
-        else if (lang === "express") setFramework("Express");
-      }
-    }
-    for (const ext of Object.keys(fileExtensionMap)) {
-      if (input.includes(`.${ext}`)) {
-        setLanguage(fileExtensionMap[ext]);
-        break;
-      }
-    }
-  };
-
-  const preScanCode = (content: string, filename: string): Issue[] => {
-    const found: Issue[] = [];
-    const lines = content.split("\n");
-    
-    lines.forEach((line, i) => {
-      if (/console\.(log|error|warn)/i.test(line)) {
-        found.push({ file: filename, line: i + 1, severity: "WARNING", description: "Console statement left in production code" });
-      }
-      if (/TODO|FIXME/i.test(line)) {
-        found.push({ file: filename, line: i + 1, severity: "SUGGESTION", description: "TODO/FIXME comment found" });
-      }
-      if (/catch\s*\(\s*\)\s*\{/i.test(line)) {
-        found.push({ file: filename, line: i + 1, severity: "WARNING", description: "Empty catch block" });
-      }
-      secretPatterns.forEach((pattern, idx) => {
-        if (pattern.test(line)) {
-          found.push({ file: filename, line: i + 1, severity: "CRITICAL", description: `Potential hardcoded secret detected` });
-        }
-      });
-    });
-    
-    return found;
-  };
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
   const callGemini = async (prompt: string, retries = 3): Promise<string> => {
     const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || "";
@@ -118,9 +52,7 @@ export default function CodeReviewClient() {
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{ role: "user", parts: [{ text: prompt }] }],
-            }),
+            body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }] }),
           }
         );
         const data = await response.json();
@@ -128,7 +60,7 @@ export default function CodeReviewClient() {
         return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response";
       } catch (error: any) {
         if (attempt === retries - 1) throw error;
-        await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+        await sleep(1000 * (attempt + 1));
       }
     }
     throw new Error("Max retries exceeded");
@@ -150,17 +82,10 @@ export default function CodeReviewClient() {
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    
     const content = await file.text();
     const ext = file.name.split(".").pop() || "";
     setLanguage(fileExtensionMap[ext] || "text");
-    
-    const newNode: FileNode = {
-      name: file.name,
-      path: file.name,
-      content,
-      type: "file"
-    };
+    const newNode: FileNode = { name: file.name, path: file.name, content, type: "file" };
     setFiles([newNode]);
     setSelectedFile(newNode);
     setInput(content);
@@ -168,44 +93,24 @@ export default function CodeReviewClient() {
 
   const handleFolderUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = Array.from(e.target.files || []);
-    const totalFiles = fileList.length;
-    let scanned = 0;
-    
     const allFiles: FileNode[] = [];
-    const allIssues: Issue[] = [];
+    let scanned = 0;
     
     for (const file of fileList) {
       scanned++;
-      setScanProgress(`Scanning file ${scanned}/${totalFiles}...`);
-      
+      setScanProgress(`Scanning file ${scanned}/${fileList.length}...`);
       const content = await file.text();
-      const pathParts = file.webkitRelativePath?.split("/") || [file.name];
-      const ext = pathParts[pathParts.length - 1].split(".").pop() || "";
-      
       allFiles.push({
-        name: pathParts[pathParts.length - 1],
-        path: file.webkitRelativePath || file.name,
+        name: (file as any).webkitRelativePath?.split("/").pop() || file.name,
+        path: (file as any).webkitRelativePath || file.name,
         content,
         type: "file"
       });
-      
-      const fileIssues = preScanCode(content, pathParts[pathParts.length - 1]);
-      allIssues.push(...fileIssues);
     }
     
     setFiles(allFiles);
-    setIssues(allIssues);
-    detectFramework(allFiles);
-  };
-
-  const detectFramework = (files: FileNode[]) => {
-    const content = files.map(f => f.content).join("\n");
-    for (const [fw, pattern] of Object.entries(frameworkPatterns)) {
-      if (pattern.test(content)) {
-        setFramework(fw.charAt(0).toUpperCase() + fw.slice(1));
-        break;
-      }
-    }
+    setScanProgress("");
+    if (allFiles.length > 0) setInput(allFiles[0].content);
   };
 
   const startReview = async () => {
@@ -213,119 +118,117 @@ export default function CodeReviewClient() {
     
     setIsReviewing(true);
     setCurrentRound(0);
+    setGeminiInfo("");
+    setLlamaFixedCode("");
     setIssues([]);
-    setFixedFiles({});
 
-    const concatenated = files.length > 0 
+    const code = files.length > 0 
       ? files.map(f => `=== FILE: ${f.path} ===\n${f.content}`).join("\n\n")
       : input;
 
-    // Round 1: Gemini analysis
+    // Gemini analysis
     setCurrentRound(1);
-    const infoPrompt = `Return ONLY a valid JSON array of issues with fields: file, line, severity, title, description, fix. No markdown. Example: [{"file":"main.py","line":27,"severity":"CRITICAL","title":"Bug","description":"Missing error check","fix":"Add try block"}]
+    const geminiResp = await callGemini(`Analyze this code. List issues with file, line, severity, description. Format: JSON array or plain text.\n\n${code}`).catch(() => "");
+    setGeminiInfo(geminiResp || "Analysis unavailable");
 
-${concatenated}`;
-    const infoResponse = await callGemini(infoPrompt).catch(() => "");
-    
-    let parsedIssues: Issue[] = [];
+    // Parse issues
+    const parsedIssues: Issue[] = [];
     try {
-      const cleanResponse = infoResponse.replace(/```json|```/g, "").trim();
-      if (cleanResponse.startsWith("[")) {
-        const jsonIssues = JSON.parse(cleanResponse);
-        if (Array.isArray(jsonIssues)) {
-          parsedIssues = jsonIssues.map((iss: any) => ({
-            file: iss.file || "unknown",
-            line: parseInt(iss.line) || 1,
-            severity: (iss.severity?.toUpperCase() || "WARNING") as "CRITICAL" | "WARNING" | "SUGGESTION",
-            description: iss.title || iss.description || "Issue found",
+      const clean = geminiResp.replace(/```json|```/g, "").trim();
+      if (clean.startsWith("[")) {
+        const arr = JSON.parse(clean);
+        if (Array.isArray(arr)) {
+          arr.forEach((t: any) => parsedIssues.push({
+            file: t.file || "unknown",
+            line: parseInt(t.line) || 1,
+            severity: t.severity?.toUpperCase() as any || "WARNING",
+            description: t.title || t.description || "Issue"
           }));
         }
       }
-    } catch (e) {
-      console.log("LLM response:", infoResponse); // Debug fallback
+    } catch {
+      // Text fallback
+      geminiResp.split("\n").forEach((ln) => {
+        const f = ln.match(/\[FILE:[^\]]+\]/i);
+        const l = ln.match(/\[LINE:(\d+)\]/i);
+        const s = ln.match(/\[SEVERITY:(\w+)\]/i);
+        if (f && l && s) {
+          parsedIssues.push({
+            file: f[0].replace(/\[FILE:|\]/gi, "").trim(),
+            line: parseInt(l[1]),
+            severity: s[1].toUpperCase() as any,
+            description: ln.replace(/\[FILE:[^\]]+\]|\[LINE:[\d]+\]|\[SEVERITY:[\w]+\]/gi, "").trim() || "Issue"
+          });
+        }
+      });
     }
     setIssues(parsedIssues);
 
-    // Round 2: LLaMA fixes
+    // LLaMA fixed code
     setCurrentRound(2);
-    const fixedCodeMap: { [path: string]: string } = {};
-    for (const file of files) {
-      const fixPrompt = `Fix this ${fileExtensionMap[file.path.split(".").pop() || ""]} code. Return only corrected code in markdown block:\n\n${file.content}`;
-      const fixedRes = await callGroq(fixPrompt).catch(() => "");
-      const fixedCode = fixedRes.match(/```[\w]*\n([\s\S]*?)\n```/)?.[1] || file.content;
-      fixedCodeMap[file.path] = fixedCode;
-    }
-    setFixedFiles(fixedCodeMap);
-    if (files.length > 0 && Object.keys(fixedCodeMap).length > 0) {
-      setInput(Object.values(fixedCodeMap)[0]);
-    }
+    const llamaResp = await callGroq(`Fix all bugs in this code. Return only code in markdown block:\n\n${code}`).catch(() => "");
+    const fixedMatch = llamaResp.match(/```[\w]*\n([\s\S]*?)\n```/);
+    setLlamaFixedCode(fixedMatch ? fixedMatch[1] : llamaResp || "Fix unavailable");
 
-    // Round 3: Score
+    // Score
     setCurrentRound(3);
-    const scoreRes = await callGroq(`Rate overall project quality 1-10. Issues found: ${parsedIssues.length}`).catch(() => "7/10");
-    const scoreMatch = scoreRes.match(/(\d+)\s*\/\s*10/);
-    setScore(scoreMatch ? Number(scoreMatch[1]) : 7);
+    const scoreResp = await callGroq(`Quality score 1-10 for this code`).catch(() => "7/10");
+    const m = scoreResp.match(/(\d+)\s*\/\s*10/);
+    setScore(m ? Number(m[1]) : 7);
 
     setIsReviewing(false);
   };
 
-  const downloadFile = (filename: string, content: string) => {
-    const blob = new Blob([content], { type: "text/plain" });
+  const downloadAll = () => {
+    const blob = new Blob([llamaFixedCode], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = filename;
+    a.download = `fixed-code.${language}`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
-  const exportPDFReport = () => {
+  const exportPDF = () => {
     const doc = new jsPDF();
     doc.setFontSize(20);
-    doc.text("Project Security Audit Report", 20, 25);
+    doc.text("Code Review Report", 20, 25);
     doc.setFontSize(12);
-    doc.text(`Framework: ${framework || "Unknown"}`, 20, 35);
-    doc.text(`Files: ${files.length}`, 20, 42);
-    doc.text(`Date: ${new Date().toLocaleString()}`, 20, 49);
+    doc.text(`Score: ${score}/10`, 20, 35);
     doc.setFontSize(14);
-    doc.text(`Quality Score: ${score}/10`, 20, 60);
-    doc.setFontSize(12);
-    
-    let y = 75;
-    issues.forEach((issue, i) => {
+    doc.text("Issues", 20, 45);
+    doc.setFontSize(10);
+    let y = 52;
+    issues.forEach((i, idx) => {
       if (y > 270) { doc.addPage(); y = 30; }
-      doc.text(`${issue.severity}: ${issue.file}:${issue.line}`, 20, y);
+      doc.text(`${i.severity}: ${i.file}:${i.line}`, 20, y);
       y += 5;
-      doc.setFontSize(10);
-      doc.text(`  ${issue.description.substring(0, 80)}`, 25, y);
+      doc.text(`  ${i.description.substring(0, 70)}`, 25, y);
       y += 8;
     });
-    doc.save("project-audit.pdf");
+    doc.save("review.pdf");
   };
 
   return (
     <div className="flex-1 flex flex-col items-center p-4 bg-gradient-to-br from-gray-950 to-black min-h-screen">
       <div className="w-full max-w-7xl flex flex-col gap-4 mb-6">
         <div className="flex gap-2 bg-gray-800 rounded-lg p-1 w-fit">
-          <button onClick={() => setInputMode("paste")} className={`px-4 py-1 rounded ${inputMode === "paste" ? "bg-blue-600 text-white" : "text-gray-400"}`}>Paste Code</button>
-          <button onClick={() => setInputMode("file")} className={`px-4 py-1 rounded ${inputMode === "file" ? "bg-blue-600 text-white" : "text-gray-400"}`}>Upload File</button>
-          <button onClick={() => setInputMode("folder")} className={`px-4 py-1 rounded ${inputMode === "folder" ? "bg-blue-600 text-white" : "text-gray-400"}`}>Upload Folder</button>
+          <button onClick={() => setInputMode("paste")} className={`px-4 py-1 rounded ${inputMode === "paste" ? "bg-blue-600 text-white" : "text-gray-400"}`}>Paste</button>
+          <button onClick={() => setInputMode("file")} className={`px-4 py-1 rounded ${inputMode === "file" ? "bg-blue-600 text-white" : "text-gray-400"}`}>File</button>
+          <button onClick={() => setInputMode("folder")} className={`px-4 py-1 rounded ${inputMode === "folder" ? "bg-blue-600 text-white" : "text-gray-400"}`}>Folder</button>
         </div>
 
         {inputMode === "folder" && (
-          <div className="border-2 border-dashed border-gray-600 rounded-lg p-8 text-center hover:border-blue-500 transition-colors">
-            <input type="file" webkitdirectory="" multiple onChange={handleFolderUpload} className="hidden" id="folder-input" {...{ webkitdirectory: "" } as any} />
-            <label htmlFor="folder-input" className="cursor-pointer text-gray-400 hover:text-white">
-              <p>📁 Drop folder here or click to browse</p>
-              <p className="text-xs mt-2">Supports: .py .js .ts .jsx .tsx .java .cpp .c .go .rs</p>
-            </label>
+          <div className="border-2 border-dashed border-gray-600 rounded-lg p-8 w-full text-center">
+            <input type="file" multiple {...{ webkitdirectory: "" } as any} onChange={handleFolderUpload} className="hidden" id="folder-input" />
+            <label htmlFor="folder-input" className="cursor-pointer text-gray-400">📁 Upload folder</label>
           </div>
         )}
 
         {inputMode === "file" && (
-          <div className="border-2 border-dashed border-gray-600 rounded-lg p-4 text-center">
+          <div className="border-2 border-dashed border-gray-600 rounded-lg p-4 w-full text-center">
             <input type="file" accept=".py,.js,.ts,.jsx,.tsx,.java,.cpp,.c,.go,.rs" onChange={handleFileUpload} className="hidden" id="file-input" />
-            <label htmlFor="file-input" className="cursor-pointer text-gray-400">📄 Click to upload file</label>
+            <label htmlFor="file-input" className="cursor-pointer text-gray-400">📄 Upload file</label>
           </div>
         )}
 
@@ -333,51 +236,43 @@ ${concatenated}`;
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Paste code here..."
-            className="w-full h-48 bg-gray-800 text-white px-4 py-3 rounded-lg border border-gray-700 font-mono"
+            placeholder="Paste code..."
+            className="w-full h-48 bg-gray-800 text-white p-3 rounded font-mono"
             disabled={isReviewing}
           />
         )}
 
-        {scanProgress && <p className="text-blue-400 animate-pulse">{scanProgress}</p>}
+        {scanProgress && <p className="text-blue-400">{scanProgress}</p>}
 
-        <button onClick={startReview} disabled={isReviewing} className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-6 py-2 rounded-lg font-semibold">
+        <button onClick={startReview} disabled={isReviewing} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded font-semibold">
           {isReviewing ? "Reviewing..." : "Start Review"}
         </button>
       </div>
 
-      {(files.length > 0 || input) && (
-        <div className="w-full max-w-7xl grid grid-cols-1 lg:grid-cols-4 gap-6">
-          {files.length > 0 && (
-            <div className="bg-gray-900 rounded-xl p-4 max-h-96 overflow-y-auto">
-              <p className="text-white font-bold mb-2">Files ({files.length})</p>
-              <p className="text-gray-400 text-xs mb-3">Total Issues: {issues.length}</p>
-              <div className="space-y-1">
-                {files.map((f, i) => (
-                  <div key={i} onClick={() => setSelectedFile(f)} className="cursor-pointer p-2 rounded hover:bg-gray-800 text-gray-300 text-sm">
-                    📄 {f.name}
-                  </div>
-                ))}
-              </div>
+      {isReviewing && (
+        <div className="w-full max-w-7xl mb-4">
+          <div className="bg-gray-800 rounded-full h-2">
+            <div className="bg-blue-500 h-2 rounded-full transition-all" style={{ width: `${(currentRound / 3) * 100}%` }} />
+          </div>
+          <p className="text-gray-400 text-sm mt-1">Round {currentRound}/3 - LLM reviewing...</p>
+        </div>
+      )}
+
+      {(geminiInfo || llamaFixedCode) && !isReviewing && (
+        <div className="w-full max-w-7xl grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+          <div className="bg-gray-900 rounded-xl p-4">
+            <h3 className="text-blue-400 font-bold mb-2">Gemini Analysis</h3>
+            <pre className="text-gray-300 text-xs max-h-64 overflow-y-auto">{geminiInfo}</pre>
+          </div>
+
+          <div className="bg-gray-900 rounded-xl p-4">
+            <div className="flex justify-between items-center mb-2">
+              <h3 className="text-orange-400 font-bold">LLaMA Fixed Code</h3>
+              {llamaFixedCode && <button onClick={downloadAll} className="text-green-400 text-xs">Download</button>}
             </div>
-          )}
-
-          <div className={`${files.length > 0 ? "lg:col-span-3" : "lg:col-span-4"} bg-gray-900 rounded-xl p-6`}>
-            {selectedFile && files.length > 0 && (
-              <>
-                <div className="flex justify-between items-center mb-4">
-                  <h3 className="text-white font-bold">{selectedFile.name}</h3>
-                  <button onClick={() => downloadFile(selectedFile.name, selectedFile.content)} className="text-gray-400 hover:text-white text-xs">Download</button>
-                </div>
-                <SyntaxHighlighter language={fileExtensionMap[selectedFile.path.split(".").pop() || ""] || "text"} style={vscDarkPlus} className="text-xs rounded">
-                  {selectedFile.content}
-                </SyntaxHighlighter>
-              </>
-            )}
-
-            {files.length === 0 && input && (
-              <SyntaxHighlighter language={language} style={vscDarkPlus} className="text-xs rounded">
-                {input}
+            {llamaFixedCode && (
+              <SyntaxHighlighter language={language} style={vscDarkPlus} className="text-xs max-h-64 overflow-y-auto rounded">
+                {llamaFixedCode}
               </SyntaxHighlighter>
             )}
           </div>
@@ -385,21 +280,18 @@ ${concatenated}`;
       )}
 
       {!isReviewing && issues.length > 0 && (
-        <div className="w-full max-w-7xl mt-8">
-          <div className="bg-gray-900 rounded-xl p-6">
-            <h3 className="text-white font-bold mb-4">Issues Found</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="w-full max-w-7xl mt-6">
+          <div className="bg-gray-900 rounded-xl p-4">
+            <h3 className="text-white font-bold mb-4">Issues ({issues.length})</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {issues.map((issue, i) => (
-                <div key={i} className={`p-4 rounded border-l-4 ${issue.severity === "CRITICAL" ? "border-red-500 bg-red-900/20" : issue.severity === "WARNING" ? "border-yellow-500 bg-yellow-900/20" : "border-blue-500 bg-blue-900/20"}`}>
-                  <p className="text-white font-semibold text-sm">{issue.file}:{issue.line}</p>
-                  <p className="text-gray-300 text-xs mt-1">{issue.description || "Issue detected"}</p>
+                <div key={i} className={`p-3 rounded border-l-4 ${issue.severity === "CRITICAL" ? "border-red-500 bg-red-900/20" : issue.severity === "WARNING" ? "border-yellow-500 bg-yellow-900/20" : "border-blue-500 bg-blue-900/20"}`}>
+                  <p className="text-white text-sm">{issue.file}:{issue.line}</p>
+                  <p className="text-gray-300 text-xs">{issue.description}</p>
                 </div>
               ))}
             </div>
-          </div>
-          
-          <div className="flex gap-4 mt-4 justify-center">
-            <button onClick={exportPDFReport} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-semibold">Export PDF</button>
+            <button onClick={exportPDF} className="mt-4 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded">Export PDF</button>
           </div>
         </div>
       )}
