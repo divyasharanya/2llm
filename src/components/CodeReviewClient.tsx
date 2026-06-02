@@ -222,18 +222,27 @@ export default function CodeReviewClient() {
 
     // Round 1: Gemini analysis
     setCurrentRound(1);
-    const infoPrompt = `You are Gemini, elite analyst. Analyze this full project. Identify bugs, security issues, cross-file problems (${framework}). List issues with [FILE: name] [LINE: #] [SEVERITY: LEVEL]. Give detailed analysis.\n\n${concatenated}`;
+    const infoPrompt = `Return ONLY a valid JSON array of issues with fields: file, line, severity, title, description, fix. No markdown. Example: [{"file":"main.py","line":27,"severity":"CRITICAL","title":"Bug","description":"Missing error check","fix":"Add try block"}]
+
+${concatenated}`;
     const infoResponse = await callGemini(infoPrompt).catch(() => "");
     
-    const parsedIssues: Issue[] = [];
-    const issueMatches = infoResponse.matchAll(/\[FILE:\s*([^\]]+)\]\s*\[LINE:\s*(\d+)\]\s*\[SEVERITY:\s*(\w+)\]/gi);
-    for (const match of issueMatches) {
-      parsedIssues.push({
-        file: match[1].trim(),
-        line: parseInt(match[2]),
-        severity: match[3].toUpperCase() as any,
-        description: infoResponse.substring(match.index!, infoResponse.indexOf("\n", match.index!)).replace(/\[FILE:[^\]]+\]\s*\[LINE:[^\]]+\]\s*\[SEVERITY:[^\]]+\]/gi, "").trim()
-      });
+    let parsedIssues: Issue[] = [];
+    try {
+      const cleanResponse = infoResponse.replace(/```json|```/g, "").trim();
+      if (cleanResponse.startsWith("[")) {
+        const jsonIssues = JSON.parse(cleanResponse);
+        if (Array.isArray(jsonIssues)) {
+          parsedIssues = jsonIssues.map((iss: any) => ({
+            file: iss.file || "unknown",
+            line: parseInt(iss.line) || 1,
+            severity: (iss.severity?.toUpperCase() || "WARNING") as "CRITICAL" | "WARNING" | "SUGGESTION",
+            description: iss.title || iss.description || "Issue found",
+          }));
+        }
+      }
+    } catch (e) {
+      console.log("LLM response:", infoResponse); // Debug fallback
     }
     setIssues(parsedIssues);
 
@@ -383,7 +392,7 @@ export default function CodeReviewClient() {
               {issues.map((issue, i) => (
                 <div key={i} className={`p-4 rounded border-l-4 ${issue.severity === "CRITICAL" ? "border-red-500 bg-red-900/20" : issue.severity === "WARNING" ? "border-yellow-500 bg-yellow-900/20" : "border-blue-500 bg-blue-900/20"}`}>
                   <p className="text-white font-semibold text-sm">{issue.file}:{issue.line}</p>
-                  <p className="text-gray-300 text-xs mt-1">{issue.description}</p>
+                  <p className="text-gray-300 text-xs mt-1">{issue.description || "Issue detected"}</p>
                 </div>
               ))}
             </div>
