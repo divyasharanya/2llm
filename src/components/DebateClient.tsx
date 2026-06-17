@@ -1,96 +1,157 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useEffect } from "react";
 import jsPDF from "jspdf";
 
 interface Argument {
   round: number;
   text: string;
-  keyPoints: string[];
-  strength: number;
+  wordCount: number;
 }
 
-interface FactCheck {
-  claim: string;
-  status: "VERIFIED" | "DISPUTED" | "UNVERIFIED";
-}
-
-interface DebateHistory {
+interface DebateSave {
+  id: string;
   topic: string;
-  category: string;
-  language: string;
   rounds: number;
-  arguments: { for: Argument[]; against: Argument[] };
+  winner: "FOR" | "AGAINST" | "DRAW";
+  date: string;
+  forArgs: Argument[];
+  againstArgs: Argument[];
   verdict: string;
-  factCheck: FactCheck[];
-  readTime: number;
-  timestamp: string;
 }
 
-const topicSuggestions = {
-  Technology: ["AI will replace most human jobs by 2030", "Quantum computing will revolutionize cybersecurity", "Web3 is the future of internet"],
-  Politics: ["Democracy is the best form of government", "Universal basic income should be implemented", "Climate change policies are effective"],
-  Science: ["CRISPR gene editing is ethically justified", "Climate change is primarily human-caused", "Space exploration is worth the investment"],
-  Ethics: ["Animal testing should be banned", "Wealth redistribution is morally required", "Free speech has limits"],
-  Business: ["Remote work increases productivity", "Corporate taxes should be increased", "Startups are better than corporate jobs"],
+interface DebateStats {
+  totalDebates: number;
+  totalRounds: number;
+  forWins: number;
+  againstWins: number;
+  categoryCounts: Record<string, number>;
+}
+
+const TOPIC_SUGGESTIONS: Record<string, string[]> = {
+  Technology: [
+    "Should AI replace software engineers?",
+    "Is social media doing more harm than good?",
+    "Should self-driving cars be fully legal?",
+  ],
+  Ethics: [
+    "Is universal basic income morally justified?",
+    "Should genetic engineering on humans be allowed?",
+    "Is capital punishment ever ethical?",
+  ],
+  Science: [
+    "Should we prioritize Mars colonization over Earth's problems?",
+    "Is nuclear energy the future of clean power?",
+    "Should animal testing be banned entirely?",
+  ],
+  Politics: [
+    "Should voting be mandatory for all citizens?",
+    "Is democracy the best form of government?",
+    "Should social media platforms be regulated by governments?",
+  ],
+  Business: [
+    "Should a 4-day work week become the global standard?",
+    "Is remote work better than working in an office?",
+    "Should big tech companies be broken up?",
+  ],
+  Environment: [
+    "Should governments ban single-use plastics entirely?",
+    "Is veganism the only sustainable diet?",
+    "Should carbon taxes be mandatory worldwide?",
+  ],
+};
+
+const CATEGORY_ICONS: Record<string, string> = {
+  Technology: "💻", Ethics: "⚖️", Science: "🔬",
+  Politics: "🏛️", Business: "💼", Environment: "🌿",
 };
 
 export default function DebateClient() {
   const [topic, setTopic] = useState("");
-  const [category, setCategory] = useState("Technology");
+  const [selectedCategory, setSelectedCategory] = useState("");
   const [language, setLanguage] = useState("English");
   const [rounds, setRounds] = useState(2);
   const [currentRound, setCurrentRound] = useState(0);
   const [forArguments, setForArguments] = useState<Argument[]>([]);
   const [againstArguments, setAgainstArguments] = useState<Argument[]>([]);
   const [verdict, setVerdict] = useState("");
-  const [factCheck, setFactCheck] = useState<FactCheck[]>([]);
+  const [winner, setWinner] = useState<"FOR" | "AGAINST" | "DRAW" | "">("");
+  const [confidence, setConfidence] = useState(50);
   const [isDebating, setIsDebating] = useState(false);
   const [debateComplete, setDebateComplete] = useState(false);
-  const [showHistory, setShowHistory] = useState(false);
   const [typing, setTyping] = useState<string | null>(null);
-  const [showConfetti, setShowConfetti] = useState(false);
-  const debateRef = useRef<HTMLDivElement>(null);
+  const [step, setStep] = useState(0); // 0=idle,1=gemini,2=llama,3=verdict
+  const [shareMsg, setShareMsg] = useState(false);
 
-  const languages = ["English", "Hindi", "Telugu"];
-  const roundOptions = [2, 3, 4];
-  const categories = ["Technology", "Politics", "Science", "Ethics", "Business"];
+  const [debateHistory, setDebateHistory] = useState<DebateSave[]>([]);
+
+  const [debateStats, setDebateStats] = useState<DebateStats>({ totalDebates: 0, totalRounds: 0, forWins: 0, againstWins: 0, categoryCounts: {} });
+
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 4000);
+  };
+
+  const fetchHistory = async () => {
+    setIsLoadingHistory(true);
+    try {
+      const response = await fetch("/api/history/list");
+      if (!response.ok) throw new Error("Failed to fetch");
+      const data = await response.json();
+      const history = data.items
+        .filter((item: any) => item.type === "debate")
+        .map((item: any) => ({
+          id: item.chatId,
+          ...item.content
+        }));
+      setDebateHistory(history);
+
+      // Compute stats in-memory dynamically from DynamoDB history items
+      let totalDebates = history.length;
+      let totalRounds = 0;
+      let forWins = 0;
+      let againstWins = 0;
+      let categoryCounts: Record<string, number> = {};
+
+      history.forEach((h: any) => {
+        totalRounds += h.rounds || 0;
+        if (h.winner === "FOR") forWins++;
+        if (h.winner === "AGAINST") againstWins++;
+        if (h.category) {
+          categoryCounts[h.category] = (categoryCounts[h.category] || 0) + 1;
+        }
+      });
+      setDebateStats({ totalDebates, totalRounds, forWins, againstWins, categoryCounts });
+    } catch {
+      showToast("Could not sync history. Retrying...");
+      setTimeout(fetchHistory, 5000);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  };
 
   useEffect(() => {
-    if (showConfetti) {
-      const timer = setTimeout(() => setShowConfetti(false), 3000);
-      return () => clearTimeout(timer);
-    }
-  }, [showConfetti]);
+    fetchHistory();
+  }, []);
 
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
   const callGemini = async (prompt: string, retries = 3): Promise<string> => {
-    const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || "";
-    if (!apiKey) {
-      throw new Error("Gemini API key not configured");
-    }
     for (let attempt = 0; attempt < retries; attempt++) {
       try {
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{ role: "user", parts: [{ text: prompt }] }],
-            }),
-          }
-        );
+        const response = await fetch("/api/gemini", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt }),
+        });
         const data = await response.json();
-        if (!response.ok) {
-          throw new Error(data.error?.message || "API error");
-        }
-        return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response";
-      } catch (error: any) {
-        if (attempt === retries - 1) {
-          throw error;
-        }
+        if (!response.ok) throw new Error(data.error || "API error");
+        return data.text;
+      } catch (error: unknown) {
+        if (attempt === retries - 1) throw error;
         await sleep(1000 * (attempt + 1));
       }
     }
@@ -98,411 +159,643 @@ export default function DebateClient() {
   };
 
   const callGroq = async (prompt: string): Promise<string> => {
-    const apiKey = process.env.NEXT_PUBLIC_GROQ_API_KEY || "";
-    if (!apiKey) {
-      throw new Error("Groq API key not configured");
-    }
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    const response = await fetch("/api/groq", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "llama-3.1-8b-instant",
-        messages: [{ role: "user", content: prompt }],
-        max_tokens: 200,
-      }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, max_tokens: 300 }),
     });
     const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.error?.message || "API error");
-    }
-    return data.choices?.[0]?.message?.content || "No response";
+    if (!response.ok) throw new Error(data.error || "API error");
+    return data.text;
   };
 
-  const extractKeyPoints = (text: string): string[] => {
-    const points = text.match(/[\d]+\.?\s*([^\n]+)/g) || [];
-    return points.slice(0, 3).map(p => p.replace(/[\d]+\.?\s*/, "").trim());
+  const parseWinner = (verdictText: string): "FOR" | "AGAINST" | "DRAW" => {
+    const upper = verdictText.toUpperCase();
+    const forScore = (upper.match(/\bFOR\b/g) || []).length;
+    const againstScore = (upper.match(/\bAGAINST\b/g) || []).length;
+    if (Math.abs(forScore - againstScore) <= 1) return "DRAW";
+    return forScore > againstScore ? "FOR" : "AGAINST";
   };
 
   const startDebate = async () => {
     if (!topic.trim()) return;
-
     setIsDebating(true);
     setCurrentRound(0);
     setForArguments([]);
     setAgainstArguments([]);
     setVerdict("");
-    setFactCheck([]);
+    setWinner("");
     setDebateComplete(false);
-    setShowHistory(false);
+    setStep(1);
+
+    const localFor: Argument[] = [];
+    const localAgainst: Argument[] = [];
 
     for (let i = 1; i <= rounds; i++) {
       setCurrentRound(i);
-      setTyping("for");
-      
-      const forPrompt = `You are Gemini, a sharp debater arguing STRONGLY IN FAVOUR of: "${topic}". Give 2-3 concrete arguments. Be assertive and logical. Max 120 words.`;
-      const forResponse = await callGemini(forPrompt).catch(() => "");
-      const forStrength = Math.floor(Math.random() * 3) + 7;
-      setForArguments((prev) => [...prev, { round: i, text: forResponse || "Analysis unavailable", keyPoints: extractKeyPoints(forResponse), strength: forStrength }]);
 
+      // Gemini — FOR
+      setTyping("for");
+      setStep(1);
+      const forResp = await callGemini(
+        `You are debating FOR the following topic. Give 2-3 strong, specific arguments in ${language}. Be concise and convincing. Max 150 words.\nTopic: "${topic}"\nRound ${i} of ${rounds}.`
+      ).catch(() => "Could not generate argument.");
+      const newFor: Argument = { round: i, text: forResp, wordCount: forResp.split(/\s+/).length };
+      localFor.push(newFor);
+      setForArguments(prev => [...prev, newFor]);
+
+      // LLaMA — AGAINST
       setTyping("against");
-      const againstPrompt = `You are LLaMA, a critical debater arguing STRONGLY AGAINST: "${topic}". Rebut the FOR side and give 2-3 counter-arguments. Max 120 words.`;
-      const againstResponse = await callGroq(againstPrompt).catch(() => "");
-      const againstStrength = Math.floor(Math.random() * 3) + 7;
-      setAgainstArguments((prev) => [...prev, { round: i, text: againstResponse || "Analysis unavailable", keyPoints: extractKeyPoints(againstResponse), strength: againstStrength }]);
+      setStep(2);
+      const againstResp = await callGroq(
+        `You are debating AGAINST the following topic. Directly rebut the FOR side and give strong counter-arguments in ${language}. Be concise and direct. Max 150 words.\nTopic: "${topic}"\nRound ${i} of ${rounds}.`
+      ).catch(() => "Could not generate argument.");
+      const newAgainst: Argument = { round: i, text: againstResp, wordCount: againstResp.split(/\s+/).length };
+      localAgainst.push(newAgainst);
+      setAgainstArguments(prev => [...prev, newAgainst]);
     }
 
     setTyping(null);
-    
-    const judgePrompt = `You are Gemini, an impartial judge. Summarize both sides of "${topic}", pick the stronger argument, and give 3 research takeaways. Max 150 words. FOR: ${forArguments.map(a => a.text).join(" ")}. AGAINST: ${againstArguments.map(a => a.text).join(" ")}`;
-    const judgeResponse = await callGemini(judgePrompt).catch(() => "");
-    const finalVerdict = judgeResponse || "Verdict unavailable due to API limits";
+    setStep(3);
+
+    // Verdict
+    const verdictPrompt = `You are a neutral debate judge. The topic is: "${topic}".\n\nFOR arguments:\n${localFor.map(a => `Round ${a.round}: ${a.text}`).join("\n")}\n\nAGAINST arguments:\n${localAgainst.map(a => `Round ${a.round}: ${a.text}`).join("\n")}\n\nGive:\n1. Which side won (FOR or AGAINST) and why in 1-2 sentences\n2. Three key takeaways from this debate as bullet points\n3. End with: "FOR argument was X% stronger" where X is a number between 51-75.`;
+    const finalVerdict = await callGemini(verdictPrompt).catch(() => "Verdict unavailable.");
     setVerdict(finalVerdict);
-    
-    const factCheckPrompt = `You are a fact checker. Review these arguments and flag any false or misleading claims. List each claim as VERIFIED, DISPUTED, or UNVERIFIED:\nFOR: ${forArguments.map(a => a.text).join(" ")}\nAGAINST: ${againstArguments.map(a => a.text).join(" ")}`;
-    const factCheckResponse = await callGemini(factCheckPrompt).catch(() => "");
-    const factChecks = factCheckResponse.match(/[^:]+:\s*(VERIFIED|DISPUTED|UNVERIFIED)/gi) || [];
-    setFactCheck(factChecks.map((f: string) => {
-      const [claim, status] = f.split(/:\s*/);
-      return { claim: claim.trim(), status: status.trim() as any };
-    }));
-    
+
+    const detectedWinner = parseWinner(finalVerdict);
+    setWinner(detectedWinner);
+
+    // Parse confidence
+    const confMatch = finalVerdict.match(/(\d+)%\s*stronger/);
+    setConfidence(confMatch ? parseInt(confMatch[1]) : 55);
+
     setDebateComplete(true);
     setIsDebating(false);
-    setShowConfetti(true);
-
-    const readTime = (forArguments.length + againstArguments.length) * 30;
-    const history: DebateHistory = {
+    setStep(0);
+    // Save to history
+    const now = new Date();
+    const dateStr = now.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + " " +
+      now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const content = {
       topic,
-      category,
-      language,
       rounds,
-      arguments: { for: [...forArguments], against: [...againstArguments] },
+      winner: detectedWinner,
+      date: dateStr,
+      forArgs: localFor,
+      againstArgs: localAgainst,
       verdict: finalVerdict,
-      factCheck: factChecks.map((f: any) => f),
-      readTime,
-      timestamp: new Date().toISOString(),
+      category: selectedCategory,
     };
-    const stored = localStorage.getItem("debateHistory") || "[]";
-    const histories = JSON.parse(stored);
-    histories.unshift(history);
-    localStorage.setItem("debateHistory", JSON.stringify(histories.slice(0, 5)));
+
+    const saveToDb = async (attempt = 1) => {
+      try {
+        const res = await fetch("/api/history/save", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "debate", content }),
+        });
+        if (!res.ok) throw new Error("Failed to save");
+        const data = await res.json();
+        
+        // Update history and stats locally
+        setDebateHistory(prev => {
+          const updated = [{ id: data.chatId, ...content }, ...prev];
+          
+          // Compute new stats
+          let totalDebates = updated.length;
+          let totalRounds = 0;
+          let forWins = 0;
+          let againstWins = 0;
+          let categoryCounts: Record<string, number> = {};
+
+          updated.forEach((h: any) => {
+            totalRounds += h.rounds || 0;
+            if (h.winner === "FOR") forWins++;
+            if (h.winner === "AGAINST") againstWins++;
+            if (h.category) {
+              categoryCounts[h.category] = (categoryCounts[h.category] || 0) + 1;
+            }
+          });
+          setDebateStats({ totalDebates, totalRounds, forWins, againstWins, categoryCounts });
+          
+          return updated;
+        });
+      } catch {
+        showToast("Could not sync history. Retrying...");
+        setTimeout(() => saveToDb(attempt + 1), 5000);
+      }
+    };
+    await saveToDb();
+  };
+
+  const loadDebate = (save: DebateSave) => {
+    setTopic(save.topic);
+    setRounds(save.rounds);
+    setForArguments(save.forArgs);
+    setAgainstArguments(save.againstArgs);
+    setVerdict(save.verdict);
+    setWinner(save.winner);
+    setDebateComplete(true);
+    setIsDebating(false);
+  };
+
+  const clearHistory = async () => {
+    const itemsToDelete = [...debateHistory];
+    setDebateHistory([]);
+    setDebateStats({ totalDebates: 0, totalRounds: 0, forWins: 0, againstWins: 0, categoryCounts: {} });
+
+    for (const item of itemsToDelete) {
+      const deleteItem = async (attempt = 1) => {
+        try {
+          const res = await fetch(`/api/history/${item.id}`, { method: "DELETE" });
+          if (!res.ok) throw new Error("Failed to delete");
+        } catch {
+          showToast("Could not sync history. Retrying...");
+          setTimeout(() => deleteItem(attempt + 1), 5000);
+        }
+      };
+      await deleteItem();
+    }
   };
 
   const exportPDF = () => {
     const doc = new jsPDF();
-    doc.setFontSize(24);
-    doc.text(`AI Debate Arena`, 20, 30);
-    doc.setFontSize(16);
-    doc.text(`Topic: ${topic}`, 20, 45);
-    doc.text(`Date: ${new Date().toLocaleDateString()}`, 20, 52);
-    doc.text(`Debaters: Gemini 2.5 Flash vs LLaMA 3.1`, 20, 59);
-    
-    let y = 75;
+    doc.setFontSize(22);
+    doc.setFont("helvetica", "bold");
+    doc.text("AI Debate Arena", 20, 28);
+    doc.setFontSize(13);
+    doc.setFont("helvetica", "normal");
+    doc.text(`Topic: ${topic}`, 20, 40);
+    doc.text(`Date: ${new Date().toLocaleDateString()}`, 20, 47);
+    let y = 58;
     forArguments.forEach((arg) => {
-      doc.setFontSize(14);
-      doc.text(`FOR - Round ${arg.round}:`, 20, y);
-      y += 6;
-      doc.setFontSize(11);
-      const splitFor = doc.splitTextToSize(arg.text, 170);
-      doc.text(splitFor, 20, y);
-      y += splitFor.length * 6 + 10;
+      if (y > 270) { doc.addPage(); y = 30; }
+      doc.setFontSize(12); doc.setFont("helvetica", "bold");
+      doc.text(`FOR — Round ${arg.round}:`, 20, y); y += 6;
+      const split = doc.splitTextToSize(arg.text, 170);
+      doc.setFontSize(10); doc.setFont("helvetica", "normal");
+      doc.text(split, 20, y); y += split.length * 5 + 8;
     });
     againstArguments.forEach((arg) => {
-      doc.setFontSize(14);
-      doc.text(`AGAINST - Round ${arg.round}:`, 20, y);
-      y += 6;
-      doc.setFontSize(11);
-      const splitAgainst = doc.splitTextToSize(arg.text, 170);
-      doc.text(splitAgainst, 20, y);
-      y += splitAgainst.length * 6 + 10;
+      if (y > 270) { doc.addPage(); y = 30; }
+      doc.setFontSize(12); doc.setFont("helvetica", "bold");
+      doc.text(`AGAINST — Round ${arg.round}:`, 20, y); y += 6;
+      const split = doc.splitTextToSize(arg.text, 170);
+      doc.setFontSize(10); doc.setFont("helvetica", "normal");
+      doc.text(split, 20, y); y += split.length * 5 + 8;
     });
-    
-    if (y > 250) {
-      doc.addPage();
-      y = 30;
-    }
-    doc.setFontSize(16);
-    doc.text("Verdict:", 20, y);
-    y += 8;
-    doc.setFontSize(12);
-    const splitVerdict = doc.splitTextToSize(verdict, 170);
-    doc.text(splitVerdict, 20, y);
-    y += splitVerdict.length * 6;
-    
-    if (factCheck.length > 0 && y < 270) {
-      doc.text("Fact Check:", 20, y + 10);
-      factCheck.forEach((fc, i) => {
-        doc.text(`• ${fc.claim}: ${fc.status}`, 25, y + 18 + i * 6);
-      });
-    }
-    
-    doc.save("debate.pdf");
+    if (y + 30 > 270) { doc.addPage(); y = 30; }
+    doc.setFontSize(14); doc.setFont("helvetica", "bold");
+    doc.text("Verdict:", 20, y); y += 7;
+    const sv = doc.splitTextToSize(verdict, 170);
+    doc.setFontSize(10); doc.setFont("helvetica", "normal");
+    doc.text(sv, 20, y);
+    doc.save(`debate-${topic.slice(0, 20).replace(/\s+/g, "-")}.pdf`);
   };
 
-  const copyToClipboard = () => {
-    const summary = `Debate: ${topic}\n\nFOR (Gemini):\n${forArguments.map(a => a.text).join("\n\n")}\n\nAGAINST (LLaMA):\n${againstArguments.map(a => a.text).join("\n\n")}\n\nVerdict: ${verdict}`;
-    navigator.clipboard.writeText(summary);
+  const shareDebate = async () => {
+    const summary = `🎙️ AI Debate: ${topic}\n\nWinner: ${winner}\n\n${verdict}\n\n— Generated by AI Debate Arena`;
+    await navigator.clipboard.writeText(summary);
+    setShareMsg(true);
+    setTimeout(() => setShareMsg(false), 2000);
   };
 
   const resetDebate = () => {
     setTopic("");
+    setSelectedCategory("");
     setForArguments([]);
     setAgainstArguments([]);
     setVerdict("");
-    setFactCheck([]);
+    setWinner("");
+    setConfidence(50);
     setDebateComplete(false);
     setCurrentRound(0);
+    setStep(0);
   };
 
-  const [historyCount, setHistoryCount] = useState(0);
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      const h = JSON.parse(localStorage.getItem("debateHistory") || "[]");
-      setHistoryCount(h.length);
-    }
-  }, [debateComplete]);
+  const topCategory = Object.entries(debateStats.categoryCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "—";
+  const totalWins = debateStats.forWins + debateStats.againstWins;
+  const forPct = totalWins > 0 ? Math.round((debateStats.forWins / totalWins) * 100) : 50;
 
   return (
-    <div className="flex-1 flex flex-col items-center p-4 bg-gradient-to-br from-gray-950 via-black to-gray-950 min-h-screen relative">
-      {showConfetti && (
-        <div className="fixed inset-0 pointer-events-none z-50">
-          {[...Array(50)].map((_, i) => (
-            <div key={i} className="absolute animate-ping" style={{ left: `${Math.random() * 100}%`, top: `${Math.random() * 100}%`, animationDelay: `${Math.random() * 2}s` }}>
-              🎉
+    <div className="flex-1 flex flex-col items-center p-6 bg-[#0D0D0D] min-h-screen font-sans">
+
+      {/* Animated top gradient line */}
+      <div
+        className="fixed top-0 left-0 right-0 h-[3px] z-50"
+        style={{
+          background: "linear-gradient(90deg, #7C3AED, #06B6D4, #F97316, #7C3AED)",
+          backgroundSize: "300% auto",
+          animation: "gradientShift 4s linear infinite",
+        }}
+      />
+      <style>{`
+        @keyframes gradientShift { 0%{background-position:0% center} 100%{background-position:300% center} }
+        @keyframes slideIn { from{opacity:0;transform:translateY(14px)} to{opacity:1;transform:translateY(0)} }
+        .slide-in { animation: slideIn 0.4s ease forwards; }
+        @keyframes pulse-glow {
+          0%,100%{box-shadow:0 0 0 0 transparent}
+          50%{box-shadow:0 0 18px rgba(124,58,237,0.3)}
+        }
+        .topic-input:focus { animation: pulse-glow 1.6s ease-in-out infinite; }
+      `}</style>
+
+      <div className="w-full max-w-7xl flex flex-col md:flex-row gap-8 mt-6">
+
+        {/* ── LEFT SIDEBAR ── */}
+        <aside className="w-full md:w-[260px] shrink-0 flex flex-col gap-5 bg-[#141414] border border-purple-500/10 rounded-2xl p-5 shadow-[0_0_30px_rgba(124,58,237,0.04)] self-start">
+
+          {/* Debate History */}
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="text-white font-bold text-sm flex items-center gap-2">
+                <svg className="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Debate History
+              </h4>
+              {debateHistory.length > 0 && (
+                <button onClick={clearHistory} className="text-[10px] text-red-400/70 hover:text-red-400 transition-colors">Clear</button>
+              )}
             </div>
-          ))}
-        </div>
-      )}
 
-      <div className="w-full max-w-7xl flex flex-col gap-4 mb-6">
-        <div className="flex flex-col md:flex-row gap-4">
-          <select
-            value={category}
-            onChange={(e) => setCategory(e.target.value)}
-            className="bg-gray-800 text-white px-4 py-2 rounded-lg border border-gray-700"
-          >
-            {categories.map((cat) => (
-              <option key={cat} value={cat}>{cat}</option>
-            ))}
-          </select>
-          <select
-            value={language}
-            onChange={(e) => setLanguage(e.target.value)}
-            className="bg-gray-800 text-white px-4 py-2 rounded-lg border border-gray-700"
-          >
-            {languages.map((lang) => (
-              <option key={lang} value={lang}>{lang}</option>
-            ))}
-          </select>
-          <select
-            value={rounds}
-            onChange={(e) => setRounds(Number(e.target.value))}
-            className="bg-gray-800 text-white px-4 py-2 rounded-lg border border-gray-700"
-          >
-            {roundOptions.map((r) => (
-              <option key={r} value={r}>{r} Rounds</option>
-            ))}
-          </select>
-        </div>
-        
-        <input
-          type="text"
-          value={topic}
-          onChange={(e) => setTopic(e.target.value)}
-          placeholder="Enter debate topic..."
-          className="flex-1 bg-gray-800 text-white px-4 py-3 rounded-lg border border-gray-700 placeholder-gray-500"
-          disabled={isDebating}
-        />
-        
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-          {topicSuggestions[category as keyof typeof topicSuggestions]?.slice(0, 3).map((suggestion, i) => (
-            <button key={i} onClick={() => setTopic(suggestion)} className="bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 py-2 rounded-lg text-sm transition-colors truncate">
-              {suggestion}
-            </button>
-          ))}
-        </div>
-        
-        <button
-          onClick={startDebate}
-          disabled={isDebating || !topic.trim()}
-          className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white px-8 py-3 rounded-lg font-semibold disabled:opacity-50 shadow-lg w-fit"
-        >
-          {isDebating ? "Debating..." : "Start Debate"}
-        </button>
-      </div>
-
-      {isDebating && (
-        <div className="w-full max-w-7xl mb-6">
-          <div className="bg-gray-800 rounded-full h-2 overflow-hidden">
-            <div className="bg-gradient-to-r from-blue-500 to-indigo-500 h-2 rounded-full transition-all duration-500" style={{ width: `${(currentRound / rounds) * 100}%` }} />
-          </div>
-          <p className="text-gray-400 text-sm mt-2">Round {currentRound} of {rounds}</p>
-        </div>
-      )}
-
-      <div className="w-full max-w-7xl grid grid-cols-1 lg:grid-cols-12 gap-6">
-        <div className="lg:col-span-9 grid grid-cols-1 md:grid-cols-2 gap-6">
-          {[1, 2].map((side) => {
-            const isFor = side === 1;
-            const args = isFor ? forArguments : againstArguments;
-            const lastArg = args[args.length - 1];
-            
-            return (
-              <div key={side} className={`bg-gray-900 rounded-xl p-6 border-2 ${isFor ? "border-blue-500/50" : "border-orange-500/50"} shadow-xl transition-all duration-500`}>
-                <div className="flex items-center gap-3 mb-4">
-                  <div className={`w-12 h-12 ${isFor ? "bg-blue-600" : "bg-orange-600"} rounded-full flex items-center justify-center`}>
-                    <span className="text-white font-bold text-lg">{isFor ? "G" : "L"}</span>
-                  </div>
-                  <div>
-                    <h3 className="text-xl font-bold text-white">{isFor ? "Gemini 2.5 Flash" : "LLaMA 3.1"}</h3>
-                    <p className={`text-sm font-medium ${isFor ? "text-blue-400" : "text-orange-400"}`}>{isFor ? "FOR - Champion" : "AGAINST - Challenger"}</p>
-                  </div>
-                </div>
-                
-                {typing === (isFor ? "for" : "against") && (
-                  <div className="bg-gray-950 rounded-lg p-4 h-64 flex items-center justify-center">
-                    <div className="flex gap-1">
-                      <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }}></div>
-                      <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }}></div>
-                      <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }}></div>
-                    </div>
-                  </div>
-                )}
-                
-                {!typing && args.length > 0 && (
-                  <div className="space-y-3">
-                    <div className="bg-gray-950 rounded-lg p-4 h-56 overflow-y-auto">
-                      <p className="text-gray-300 text-sm leading-relaxed">{lastArg?.text}</p>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-gray-500">{lastArg?.text?.split(" ").length || 0} words</span>
-                      <div className={`px-2 py-1 rounded ${lastArg?.strength >= 8 ? "bg-green-600" : lastArg?.strength >= 6 ? "bg-yellow-600" : "bg-red-600"} text-white`}>
-                        Strength: {lastArg?.strength}/10
-                      </div>
-                    </div>
-                    {lastArg?.keyPoints && (
-                      <div className="bg-gray-950 rounded-lg p-3">
-                        <p className="text-gray-400 text-xs font-semibold mb-1">Key Points:</p>
-                        <ul className="text-gray-300 text-xs space-y-1">
-                          {lastArg.keyPoints.map((point, i) => (
-                            <li key={i} className="flex items-start gap-1">
-                              <span className="text-blue-400">•</span> {point}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                  </div>
-                )}
+            {isLoadingHistory ? (
+              <div className="flex flex-col items-center gap-2 py-6 bg-[#0D0D0D]/50 rounded-xl border border-dashed border-purple-500/10">
+                <span className="text-xl animate-spin text-purple-400">🌀</span>
+                <p className="text-gray-600 text-[11px] italic text-center">Syncing history...</p>
               </div>
-            );
-          })}
-        </div>
+            ) : debateHistory.length === 0 ? (
+              <div className="flex flex-col items-center gap-2 py-6 bg-[#0D0D0D]/50 rounded-xl border border-dashed border-purple-500/10">
+                <span className="text-2xl opacity-30">🎙️</span>
+                <p className="text-gray-600 text-[11px] italic text-center">No debates yet.<br/>Start your first debate!</p>
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-[260px] overflow-y-auto pr-1">
+                {debateHistory.map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => loadDebate(item)}
+                    className="w-full text-left bg-[#0D0D0D] border border-purple-500/5 hover:border-purple-500/30 hover:bg-[#1A1A1A] p-3 rounded-xl transition-all flex flex-col gap-1.5 group"
+                  >
+                    {/* Date + rounds */}
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-gray-600">{item.date}</span>
+                      <span className="bg-[#1a1a1a] border border-purple-500/15 text-purple-400 text-[10px] px-2 py-0.5 rounded-full">{item.rounds}R</span>
+                    </div>
+                    {/* Topic */}
+                    <p className="text-[#A1A1AA] text-[11px] leading-snug line-clamp-2 group-hover:text-gray-300 transition-colors">
+                      {item.topic}
+                    </p>
+                    {/* Winner badge */}
+                    <span className={`self-start text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                      item.winner === "FOR" ? "bg-cyan-500/15 text-cyan-400" :
+                      item.winner === "AGAINST" ? "bg-orange-500/15 text-orange-400" :
+                      "bg-gray-700/40 text-gray-400"
+                    }`}>
+                      {item.winner === "FOR" ? "🤖 FOR wins" : item.winner === "AGAINST" ? "🔥 AGAINST wins" : "🤝 DRAW"}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
 
-        <div className="lg:col-span-3">
-          <div className="bg-gray-900 rounded-xl p-4 sticky top-4">
-            <h4 className="text-white font-semibold mb-3">Debate Timeline</h4>
-            <div className="space-y-2">
-              {Array.from({ length: rounds }, (_, i) => i + 1).map((r) => (
-                <div key={r} className={`flex items-center gap-2 p-2 rounded transition-all ${currentRound >= r ? "bg-blue-600/20" : "bg-gray-800"}`}>
-                  <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${currentRound >= r ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-400"}`}>
-                    {r}
-                  </div>
-                  <span className="text-gray-300 text-sm">Round {r}</span>
+          {/* Divider */}
+          <div className="h-px bg-purple-500/10" />
+
+          {/* Live Stats */}
+          <div>
+            <h4 className="text-white font-bold text-sm flex items-center gap-2 mb-3">
+              <svg className="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+              Live Stats
+            </h4>
+            <div className="grid grid-cols-2 gap-2 mb-3">
+              {[
+                { icon: "🗣️", value: debateStats.totalDebates, label: "Debates", color: "text-purple-400" },
+                { icon: "⚡", value: debateStats.totalRounds, label: "Rounds", color: "text-cyan-400" },
+                { icon: "🤖", value: debateStats.forWins, label: "FOR Wins", color: "text-cyan-400" },
+                { icon: "🔥", value: debateStats.againstWins, label: "AGAINST", color: "text-orange-400" },
+              ].map((stat) => (
+                <div key={stat.label} className="bg-[#0D0D0D] rounded-xl p-3 text-center border border-purple-500/5 hover:border-purple-500/15 transition-colors">
+                  <span className="text-base block mb-0.5">{stat.icon}</span>
+                  <p className={`font-bold text-sm ${stat.color}`}>{stat.value}</p>
+                  <p className="text-gray-600 text-[10px]">{stat.label}</p>
                 </div>
               ))}
-              <div className={`flex items-center gap-2 p-2 rounded transition-all ${debateComplete ? "bg-green-600/20" : "bg-gray-800"}`}>
-                <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${debateComplete ? "bg-green-600 text-white" : "bg-gray-700 text-gray-400"}`}>
-                  ✓
+            </div>
+            {/* FOR vs AGAINST bar */}
+            {totalWins > 0 && (
+              <div className="bg-[#0D0D0D] rounded-xl p-3 border border-purple-500/5">
+                <div className="flex justify-between text-[10px] mb-1.5">
+                  <span className="text-cyan-400 font-semibold">FOR {forPct}%</span>
+                  <span className="text-orange-400 font-semibold">{100 - forPct}% AGAINST</span>
                 </div>
-                <span className="text-gray-300 text-sm">Verdict</span>
+                <div className="h-2 rounded-full bg-orange-500/30 overflow-hidden">
+                  <div className="h-full rounded-full bg-cyan-500 transition-all" style={{ width: `${forPct}%` }} />
+                </div>
               </div>
-            </div>
-            
-<button onClick={() => setShowHistory(true)} className="w-full mt-4 bg-gray-800 hover:bg-gray-700 text-white py-2 rounded-lg text-sm">
-               View History ({historyCount})
-             </button>
+            )}
+            {topCategory !== "—" && (
+              <div className="mt-2 bg-[#0D0D0D] rounded-xl p-3 text-center border border-purple-500/5">
+                <span className="text-base">{CATEGORY_ICONS[topCategory] || "🏆"}</span>
+                <p className="text-white font-bold text-xs mt-0.5">{topCategory}</p>
+                <p className="text-gray-600 text-[10px]">Most Debated</p>
+              </div>
+            )}
           </div>
-        </div>
-      </div>
+        </aside>
 
-      {debateComplete && (
-        <div className="w-full max-w-7xl mt-8">
-          <div className="bg-gradient-to-r from-gray-800 to-gray-900 rounded-xl p-8 border border-blue-500/50 shadow-2xl">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center">
-                <span className="text-white font-bold text-sm">G</span>
+        {/* ── MAIN AREA ── */}
+        <main className="flex-1 flex flex-col gap-6 min-w-0">
+
+          {/* Title + badges */}
+          <div>
+            <h1 className="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-[#7C3AED] via-purple-400 to-[#06B6D4] mb-3">
+              AI Debate Arena
+            </h1>
+            <div className="flex flex-wrap gap-2">
+              {[
+                { text: "⚡ Powered by Gemini vs LLaMA", color: "border-purple-500/20 text-purple-300" },
+                { text: "🧠 Research-grade arguments", color: "border-cyan-500/20 text-cyan-300" },
+                { text: "📄 Export to PDF", color: "border-orange-500/20 text-orange-300" },
+              ].map((b) => (
+                <span key={b.text} className={`text-[11px] px-3 py-1 rounded-full border bg-[#141414] ${b.color}`}>{b.text}</span>
+              ))}
+            </div>
+          </div>
+
+          {/* Topic Input */}
+          <div className="flex flex-col gap-3">
+            <input
+              type="text"
+              value={topic}
+              onChange={(e) => setTopic(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !isDebating) startDebate(); }}
+              placeholder="Enter a debate topic... (e.g. Should AI replace teachers?)"
+              className="topic-input w-full bg-[#141414] text-white px-5 py-4 rounded-2xl border-2 border-purple-500/20 hover:border-purple-500/40 focus:border-purple-500/70 placeholder-gray-700 text-sm transition-all focus:outline-none"
+              disabled={isDebating}
+            />
+
+            {/* Category pills */}
+            <div className="flex flex-wrap gap-2">
+              {Object.keys(TOPIC_SUGGESTIONS).map((cat) => (
+                <button
+                  key={cat}
+                  onClick={() => setSelectedCategory(selectedCategory === cat ? "" : cat)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+                    selectedCategory === cat
+                      ? "bg-purple-600/20 border-purple-500/60 text-white"
+                      : "bg-[#141414] border-purple-500/10 text-gray-500 hover:text-gray-300 hover:border-purple-500/30"
+                  }`}
+                >
+                  <span>{CATEGORY_ICONS[cat]}</span> {cat}
+                </button>
+              ))}
+            </div>
+
+            {/* Suggested topics */}
+            {selectedCategory && (
+              <div className="slide-in flex flex-col gap-2">
+                <p className="text-[11px] text-gray-600 uppercase tracking-widest">Suggested topics for {selectedCategory}</p>
+                <div className="flex flex-col gap-1.5">
+                  {TOPIC_SUGGESTIONS[selectedCategory].map((t) => (
+                    <button
+                      key={t}
+                      onClick={() => { setTopic(t); setSelectedCategory(""); }}
+                      className="text-left text-sm text-[#A1A1AA] hover:text-white bg-[#141414] hover:bg-[#1a1a1a] border border-purple-500/10 hover:border-purple-500/30 px-4 py-2.5 rounded-xl transition-all"
+                    >
+                      → {t}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <h3 className="text-2xl font-bold text-white">Verdict - Gemini Judge</h3>
-            </div>
-            <div className="bg-gray-900/50 rounded-lg p-6">
-              <p className="text-gray-300 leading-relaxed">{verdict}</p>
-            </div>
+            )}
           </div>
-          
-          <div className="flex gap-4 mt-4 justify-center">
-            <button onClick={exportPDF} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-semibold shadow-lg">
-              Export PDF
-            </button>
-            <button onClick={copyToClipboard} className="bg-gray-700 hover:bg-gray-600 text-white px-6 py-2 rounded-lg font-semibold shadow-lg">
-              Share
-            </button>
-            <button onClick={resetDebate} className="bg-gray-700 hover:bg-gray-600 text-white px-6 py-2 rounded-lg font-semibold shadow-lg">
-              New Debate
+
+          {/* Controls row */}
+          <div className="flex flex-wrap gap-3 items-center">
+            <select
+              value={rounds}
+              onChange={(e) => setRounds(Number(e.target.value))}
+              className="bg-[#141414] text-white px-4 py-2.5 rounded-xl border border-purple-500/15 text-sm focus:outline-none focus:border-purple-500/50"
+            >
+              {[2, 3, 4].map((r) => (
+                <option key={r} value={r}>{r} Rounds</option>
+              ))}
+            </select>
+            <select
+              value={language}
+              onChange={(e) => setLanguage(e.target.value)}
+              className="bg-[#141414] text-white px-4 py-2.5 rounded-xl border border-purple-500/15 text-sm focus:outline-none focus:border-purple-500/50"
+            >
+              {["English", "Hindi", "Telugu"].map((l) => (
+                <option key={l} value={l}>{l}</option>
+              ))}
+            </select>
+            <button
+              onClick={startDebate}
+              disabled={isDebating || !topic.trim()}
+              className="flex-1 bg-gradient-to-r from-[#7C3AED] to-[#06B6D4] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold py-2.5 px-6 rounded-xl transition-all text-sm uppercase tracking-widest shadow-[0_0_20px_rgba(124,58,237,0.25)]"
+            >
+              {isDebating ? "Debating..." : "⚡ Start Debate"}
             </button>
           </div>
-          
-          {factCheck.length > 0 && (
-            <div className="mt-6 bg-gray-900 rounded-xl p-6">
-              <h4 className="text-white font-bold mb-3">Fact Check Results</h4>
-              <div className="space-y-2">
-                {factCheck.map((fc, i) => (
-                  <div key={i} className="flex items-center gap-2 text-sm">
-                    <span className={`px-2 py-1 rounded ${fc.status === "VERIFIED" ? "bg-green-600" : fc.status === "DISPUTED" ? "bg-yellow-600" : "bg-red-600"} text-white`}>
-                      {fc.status}
-                    </span>
-                    <span className="text-gray-300">{fc.claim}</span>
+
+          {/* Step Indicator */}
+          {isDebating && (
+            <div className="slide-in bg-[#141414] border border-purple-500/10 rounded-xl p-4 flex flex-col gap-3">
+              {[
+                { s: 1, label: `Gemini building argument... (Round ${currentRound})`, done: step > 1 },
+                { s: 2, label: `LLaMA counter-arguing... (Round ${currentRound})`, done: step > 2 },
+                { s: 3, label: "Generating verdict...", done: step > 3 },
+              ].map(({ s, label, done }) => (
+                <div key={s} className={`flex items-center gap-3 transition-all ${
+                  step === s ? "opacity-100" : step > s ? "opacity-60" : "opacity-25"
+                }`}>
+                  <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold border-2 ${
+                    done ? "bg-green-500/20 border-green-500 text-green-400" :
+                    step === s ? "border-purple-500 text-purple-400 animate-pulse" :
+                    "border-gray-700 text-gray-600"
+                  }`}>
+                    {done ? "✓" : s}
                   </div>
-                ))}
+                  <span className={`text-sm ${
+                    done ? "text-green-400" : step === s ? "text-purple-300" : "text-gray-600"
+                  }`}>{label}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Round timeline */}
+          {(isDebating || debateComplete) && forArguments.length > 0 && (
+            <div className="flex items-center gap-3">
+              {[...Array(rounds)].map((_, i) => (
+                <div key={i} className={`flex items-center gap-2`}>
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold border-2 transition-all ${
+                    i + 1 < currentRound || debateComplete ? "bg-purple-500/20 border-purple-500 text-purple-400" :
+                    i + 1 === currentRound ? "border-cyan-500 text-cyan-400 animate-pulse" :
+                    "border-gray-700 text-gray-600"
+                  }`}>
+                    {i + 1 < currentRound || debateComplete ? "✓" : i + 1}
+                  </div>
+                  {i < rounds - 1 && <div className="w-6 h-px bg-gray-700" />}
+                </div>
+              ))}
+              {debateComplete && (
+                <div className="ml-2 w-8 h-8 rounded-full flex items-center justify-center text-xs border-2 bg-purple-600/20 border-purple-500 text-purple-400">⚖️</div>
+              )}
+            </div>
+          )}
+
+          {/* FOR / AGAINST Cards */}
+          {(forArguments.length > 0 || isDebating) && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+              {/* FOR - Gemini */}
+              <div className="bg-[#141414] rounded-2xl p-5 border-2 border-cyan-500/25 shadow-[0_0_20px_rgba(6,182,212,0.06)] flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl">🤖</span>
+                    <div>
+                      <h3 className="text-cyan-400 font-bold text-sm uppercase tracking-wider">FOR</h3>
+                      <p className="text-[10px] text-gray-600">Gemini</p>
+                    </div>
+                  </div>
+                  {forArguments.length > 0 && (
+                    <span className="text-[10px] text-gray-600">{forArguments[forArguments.length-1]?.wordCount || 0} words</span>
+                  )}
+                </div>
+                {typing === "for" ? (
+                  <div className="flex items-center gap-3 py-8 justify-center">
+                    {[0,1,2].map(i => (
+                      <div key={i} className="w-2.5 h-2.5 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: `${i*160}ms` }} />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {forArguments.map((arg) => (
+                      <div key={arg.round} className="slide-in p-3.5 rounded-xl border-l-4 border-cyan-500 bg-cyan-950/10">
+                        <div className="text-[10px] text-cyan-600 font-bold uppercase tracking-wider mb-1.5">Round {arg.round}</div>
+                        <p className="text-gray-300 text-sm leading-relaxed">{arg.text}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* AGAINST - LLaMA */}
+              <div className="bg-[#141414] rounded-2xl p-5 border-2 border-orange-500/25 shadow-[0_0_20px_rgba(249,115,22,0.06)] flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl">🔥</span>
+                    <div>
+                      <h3 className="text-orange-400 font-bold text-sm uppercase tracking-wider">AGAINST</h3>
+                      <p className="text-[10px] text-gray-600">LLaMA</p>
+                    </div>
+                  </div>
+                  {againstArguments.length > 0 && (
+                    <span className="text-[10px] text-gray-600">{againstArguments[againstArguments.length-1]?.wordCount || 0} words</span>
+                  )}
+                </div>
+                {typing === "against" ? (
+                  <div className="flex items-center gap-3 py-8 justify-center">
+                    {[0,1,2].map(i => (
+                      <div key={i} className="w-2.5 h-2.5 bg-orange-400 rounded-full animate-bounce" style={{ animationDelay: `${i*160}ms` }} />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {againstArguments.map((arg) => (
+                      <div key={arg.round} className="slide-in p-3.5 rounded-xl border-l-4 border-orange-500 bg-orange-950/10">
+                        <div className="text-[10px] text-orange-600 font-bold uppercase tracking-wider mb-1.5">Round {arg.round}</div>
+                        <p className="text-gray-300 text-sm leading-relaxed">{arg.text}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}
-        </div>
-      )}
 
-      {showHistory && (
-        <div className="fixed inset-0 bg-black/50 z-40 flex items-center justify-center p-4">
-          <div className="bg-gray-900 rounded-xl p-6 max-w-2xl w-full max-h-96 overflow-y-auto">
-            <h3 className="text-white font-bold mb-4">Debate History</h3>
-            {typeof window === "undefined" ? (
-              <p className="text-gray-400">Loading...</p>
-            ) : (() => {
-              const h = JSON.parse(localStorage.getItem("debateHistory") || "[]");
-              return h.length === 0 ? (
-                <p className="text-gray-400">No previous debates</p>
-              ) : (
-                <div className="space-y-3">
-                  {h.map((item: DebateHistory, i: number) => (
-                    <div key={i} className="bg-gray-800 rounded-lg p-3 cursor-pointer hover:bg-gray-700" onClick={() => {
-                      setTopic(item.topic);
-                      setCategory(item.category);
-                      setForArguments(item.arguments.for);
-                      setAgainstArguments(item.arguments.against);
-                      setVerdict(item.verdict);
-                      setDebateComplete(true);
-                      setShowHistory(false);
-                    }}>
-                      <p className="text-white font-medium">{item.topic}</p>
-                      <p className="text-gray-400 text-xs">{new Date(item.timestamp).toLocaleString()}</p>
-                    </div>
-                  ))}
+          {/* Verdict Card */}
+          {debateComplete && verdict && (
+            <div className="slide-in">
+              {/* Winner Banner */}
+              <div className={`rounded-t-2xl px-5 py-3 flex items-center gap-3 ${
+                winner === "FOR" ? "bg-cyan-500/15 border-b border-cyan-500/30" :
+                winner === "AGAINST" ? "bg-orange-500/15 border-b border-orange-500/30" :
+                "bg-purple-500/15 border-b border-purple-500/30"
+              }`}>
+                <span className="text-2xl">
+                  {winner === "FOR" ? "🤖" : winner === "AGAINST" ? "🔥" : "🤝"}
+                </span>
+                <div>
+                  <p className={`font-black text-base uppercase tracking-widest ${
+                    winner === "FOR" ? "text-cyan-400" : winner === "AGAINST" ? "text-orange-400" : "text-purple-400"
+                  }`}>
+                    {winner === "FOR" ? "FOR wins" : winner === "AGAINST" ? "AGAINST wins" : "Draw"}
+                  </p>
+                  <p className="text-gray-500 text-[11px]">
+                    {winner !== "DRAW" && `${winner === "FOR" ? "FOR" : "AGAINST"} argument was ${confidence}% stronger`}
+                  </p>
                 </div>
-              );
-            })()}
-          </div>
+              </div>
+
+              {/* Verdict body */}
+              <div className="bg-[#141414] border border-purple-500/15 border-t-0 rounded-b-2xl p-5">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="text-xl">⚖️</span>
+                  <h3 className="text-white font-bold text-base">Verdict</h3>
+                </div>
+                <p className="text-[#A1A1AA] text-sm leading-relaxed whitespace-pre-line">{verdict}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Action Buttons */}
+          {debateComplete && (
+            <div className="slide-in flex flex-col sm:flex-row gap-3">
+              <button
+                onClick={shareDebate}
+                className={`flex items-center justify-center gap-2 px-5 py-3 rounded-xl font-bold text-sm border transition-all ${
+                  shareMsg
+                    ? "bg-green-500/20 border-green-500/40 text-green-400"
+                    : "bg-[#141414] border-purple-500/20 text-gray-300 hover:border-purple-500/50 hover:text-white"
+                }`}
+              >
+                {shareMsg ? "✓ Copied!" : "🔗 Share"}
+              </button>
+              <button
+                onClick={exportPDF}
+                className="flex-1 flex items-center justify-center gap-2 bg-gradient-to-r from-[#7C3AED] to-purple-600 hover:opacity-90 text-white font-bold py-3 px-5 rounded-xl transition-all text-sm shadow-[0_0_15px_rgba(124,58,237,0.2)]"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2.5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                </svg>
+                Export PDF
+              </button>
+              <button
+                onClick={resetDebate}
+                className="px-5 py-3 rounded-xl font-bold text-sm bg-[#141414] border border-purple-500/10 hover:border-purple-500/30 text-gray-400 hover:text-white transition-all"
+              >
+                New Debate
+              </button>
+            </div>
+          )}
+        </main>
+      </div>
+
+      {/* Toast Alert */}
+      {toastMessage && (
+        <div className="fixed bottom-6 right-6 z-50 bg-red-950/90 border border-red-500 text-red-300 px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2 animate-in fade-in slide-in-from-bottom-5 duration-300">
+          <svg className="w-4 h-4 text-red-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2.5">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+          <span className="text-xs font-semibold">{toastMessage}</span>
         </div>
       )}
     </div>
