@@ -5,6 +5,15 @@ import { ddbDocClient } from "@/lib/dynamodb";
 import { GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import bcrypt from "bcryptjs";
 
+console.log("AUTH DEBUG:", {
+  AUTH_SECRET: process.env.AUTH_SECRET ? "DEFINED" : "MISSING",
+  NEXTAUTH_SECRET: process.env.NEXTAUTH_SECRET ? "DEFINED" : "MISSING",
+  AUTH_URL: process.env.AUTH_URL ? "DEFINED" : "MISSING",
+  NEXTAUTH_URL: process.env.NEXTAUTH_URL ? "DEFINED" : "MISSING",
+  GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ? "DEFINED" : "MISSING",
+  GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET ? "DEFINED" : "MISSING",
+});
+
 export const { handlers, signIn, signOut, auth } = NextAuth({
   providers: [
     Google({
