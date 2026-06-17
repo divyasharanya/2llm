@@ -7,7 +7,7 @@ export async function GET() {
     session,
     userId: (session?.user as any)?.id ?? null,
     userEmail: session?.user?.email ?? null,
-    awsRegion: process.env.AWS_REGION ?? "UNDEFINED",
+    awsRegion: process.env.APP_AWS_REGION ?? "UNDEFINED",
     tableName: process.env.DYNAMODB_TABLE_NAME ?? "UNDEFINED",
     hasSecret: !!process.env.AUTH_SECRET,
   });

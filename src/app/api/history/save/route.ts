@@ -16,7 +16,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "User ID not found in session" }, { status: 401 });
     }
 
-    console.log("[history/save] userId:", userId, "| region:", process.env.AWS_REGION, "| table:", tableName);
+    console.log("[history/save] userId:", userId, "| region:", process.env.APP_AWS_REGION, "| table:", tableName);
 
     const { type, content } = await request.json();
     if (!type || !content) {

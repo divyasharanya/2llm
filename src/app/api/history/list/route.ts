@@ -16,7 +16,7 @@ export async function GET() {
       return NextResponse.json({ error: "User ID not found in session" }, { status: 401 });
     }
 
-    console.log("[history/list] userId:", userId, "| region:", process.env.AWS_REGION, "| table:", tableName);
+    console.log("[history/list] userId:", userId, "| region:", process.env.APP_AWS_REGION, "| table:", tableName);
 
     const result = await ddbDocClient.send(
       new QueryCommand({
