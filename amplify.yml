@@ -4,6 +4,8 @@ frontend:
     preBuild:
       commands:
         - npm install
+        - rm -f .env.production
+        - printenv | grep -E '^(AUTH_|GOOGLE_|APP_AWS_|DYNAMODB_|ADMIN_|NEXT_PUBLIC_)' > .env.production
     build:
       commands:
         - npm run build
