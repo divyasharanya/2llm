@@ -9,7 +9,8 @@ export default function Navbar() {
   const [dropdownOpen, setDropdownOpen] = useState(false);
 
   const handleLogout = async () => {
-    await signOut({ callbackUrl: "/" });
+    await signOut({ redirect: false, callbackUrl: "/" });
+    window.location.assign("/");
   };
 
   return (
