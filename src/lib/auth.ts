@@ -5,15 +5,6 @@ import { ddbDocClient } from "@/lib/dynamodb";
 import { GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import bcrypt from "bcryptjs";
 
-console.log("AUTH DEBUG:", {
-  AUTH_SECRET: process.env.AUTH_SECRET ? "DEFINED" : "MISSING",
-  NEXTAUTH_SECRET: process.env.NEXTAUTH_SECRET ? "DEFINED" : "MISSING",
-  AUTH_URL: process.env.AUTH_URL ? "DEFINED" : "MISSING",
-  NEXTAUTH_URL: process.env.NEXTAUTH_URL ? "DEFINED" : "MISSING",
-  GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ? "DEFINED" : "MISSING",
-  GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET ? "DEFINED" : "MISSING",
-});
-
 export const { handlers, signIn, signOut, auth } = NextAuth({
   providers: [
     Google({
@@ -58,7 +49,6 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
             return null;
           }
 
-          // Return user details for session creation
           return {
             id: dbUser.userId,
             email: dbUser.email,
@@ -77,34 +67,19 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     signIn: "/login",
   },
   callbacks: {
-    async signIn({ user, account, profile }) {
-      console.log(
-        "[auth:signIn] Callback triggered. Provider:",
-        account?.provider,
-        "| Email:",
-        user?.email,
-        "| ID:",
-        user?.id,
-        "| Profile sub:",
-        (profile as any)?.sub
-      );
-      
-      // For Google login, sync the user into the Users table (credentials users are inserted at signup)
+    async signIn({ user, account }) {
+      const now = new Date().toISOString();
+
       if (account?.provider === "google" && user.email) {
         try {
           const userId = user.email.toLowerCase().trim();
-          const now = new Date().toISOString();
-          console.log("[auth:signIn] Attempting DynamoDB update for Google user in Users table. userId:", userId);
-          
           await ddbDocClient.send(
             new UpdateCommand({
               TableName: "Users",
               Key: { userId },
               UpdateExpression:
                 "SET email = :email, #name = :name, image = :image, authProvider = :provider, lastLoginAt = :now, firstLoginAt = if_not_exists(firstLoginAt, :now)",
-              ExpressionAttributeNames: {
-                "#name": "name",
-              },
+              ExpressionAttributeNames: { "#name": "name" },
               ExpressionAttributeValues: {
                 ":email": user.email.toLowerCase().trim(),
                 ":name": user.name || "",
@@ -114,48 +89,50 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
               },
             })
           );
-          console.log("[auth:signIn] Successfully updated Users table for Google user:", userId);
         } catch (error: any) {
-          console.error("[auth:signIn] Error writing Google user to Users table:", error);
+          console.error("[signIn] Failed to sync Google user to DynamoDB:", error.message);
         }
       } else if (account?.provider === "credentials" && user.email) {
-        // Update lastLoginAt for credentials user
         try {
           const userId = user.email.toLowerCase().trim();
-          const now = new Date().toISOString();
-          console.log("[auth:signIn] Attempting DynamoDB update for Credentials user in Users table. userId:", userId);
-          
           await ddbDocClient.send(
             new UpdateCommand({
               TableName: "Users",
               Key: { userId },
               UpdateExpression: "SET lastLoginAt = :now",
-              ExpressionAttributeValues: {
-                ":now": now,
-              },
+              ExpressionAttributeValues: { ":now": now },
             })
           );
-          console.log("[auth:signIn] Successfully updated lastLoginAt for Credentials user:", userId);
         } catch (error: any) {
-          console.error("[auth:signIn] Error updating lastLoginAt for Credentials user:", error);
+          console.error("[signIn] Failed to update lastLoginAt for credentials user:", error.message);
         }
       }
+
       return true;
     },
+
     async jwt({ token, user }) {
-      if (user && user.email) {
-        token.id = user.email.toLowerCase().trim();
+      // Only runs on sign-in when `user` is populated — binds identity to the token
+      if (user) {
+        token.id = (user.email ?? "").toLowerCase().trim();
+        token.name = user.name;
+        token.email = user.email;
+        token.picture = user.image;
       }
       return token;
     },
+
     async session({ session, token }) {
-      if (session.user) {
-        (session.user as any).id = token.id;
-        (session.user as any).isAdmin =
-          session.user.email &&
-          process.env.ADMIN_EMAIL &&
-          session.user.email.toLowerCase().trim() === process.env.ADMIN_EMAIL.toLowerCase().trim();
-      }
+      // Always derive session identity from the JWT token, never from stale session.user
+      session.user.name = token.name as string;
+      session.user.email = token.email as string;
+      session.user.image = token.picture as string;
+      (session.user as any).id = token.id;
+      (session.user as any).isAdmin =
+        !!token.email &&
+        !!process.env.ADMIN_EMAIL &&
+        (token.email as string).toLowerCase().trim() ===
+          process.env.ADMIN_EMAIL.toLowerCase().trim();
       return session;
     },
   },

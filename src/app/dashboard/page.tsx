@@ -45,7 +45,7 @@ export default function Dashboard() {
       }
     };
     fetchStats();
-  }, [status]);
+  }, [status, session?.user?.email]);
 
   if (status === "loading" || status === "unauthenticated") {
     return (
