@@ -3,6 +3,9 @@ import { auth } from "@/lib/auth";
 import { ddbDocClient, tableName } from "@/lib/dynamodb";
 import { PutCommand } from "@aws-sdk/lib-dynamodb";
 
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+
 export async function POST(request: Request) {
   try {
     const session = await auth();
@@ -40,7 +43,11 @@ export async function POST(request: Request) {
     );
 
     console.log("[history/save] Saved successfully. chatId:", chatId);
-    return NextResponse.json({ success: true, chatId });
+    const response = NextResponse.json({ success: true, chatId });
+    response.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    response.headers.set("Pragma", "no-cache");
+    response.headers.set("Surrogate-Control", "no-store");
+    return response;
   } catch (error: any) {
     console.error("[history/save] Error:", error.message);
     return NextResponse.json({ error: error.message || "Failed to save history" }, { status: 500 });

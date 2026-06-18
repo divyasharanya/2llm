@@ -3,6 +3,9 @@ import { auth } from "@/lib/auth";
 import { ddbDocClient, tableName } from "@/lib/dynamodb";
 import { DeleteCommand } from "@aws-sdk/lib-dynamodb";
 
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+
 export async function DELETE(
   request: Request,
   { params }: { params: Promise<{ chatId: string }> }

@@ -16,3 +16,50 @@ frontend:
   cache:
     paths:
       - node_modules/**/*
+
+# Custom response headers applied by CloudFront/Amplify CDN.
+# This prevents the CDN from caching per-user API responses or
+# SSR pages and serving them cross-user (session data leakage).
+customHeaders:
+  - pattern: '/api/**'
+    headers:
+      - key: 'Cache-Control'
+        value: 'no-store, no-cache, must-revalidate, proxy-revalidate'
+      - key: 'Pragma'
+        value: 'no-cache'
+      - key: 'Surrogate-Control'
+        value: 'no-store'
+      - key: 'Vary'
+        value: 'Cookie, Authorization'
+  - pattern: '/dashboard'
+    headers:
+      - key: 'Cache-Control'
+        value: 'no-store, no-cache, must-revalidate, proxy-revalidate'
+      - key: 'Pragma'
+        value: 'no-cache'
+      - key: 'Surrogate-Control'
+        value: 'no-store'
+      - key: 'Vary'
+        value: 'Cookie, Authorization'
+  - pattern: '/admin'
+    headers:
+      - key: 'Cache-Control'
+        value: 'no-store, no-cache, must-revalidate, proxy-revalidate'
+      - key: 'Pragma'
+        value: 'no-cache'
+      - key: 'Surrogate-Control'
+        value: 'no-store'
+      - key: 'Vary'
+        value: 'Cookie, Authorization'
+  - pattern: '/login'
+    headers:
+      - key: 'Cache-Control'
+        value: 'no-store, no-cache, must-revalidate, proxy-revalidate'
+      - key: 'Pragma'
+        value: 'no-cache'
+  - pattern: '/signup'
+    headers:
+      - key: 'Cache-Control'
+        value: 'no-store, no-cache, must-revalidate, proxy-revalidate'
+      - key: 'Pragma'
+        value: 'no-cache'

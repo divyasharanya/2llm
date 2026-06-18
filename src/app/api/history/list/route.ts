@@ -3,6 +3,9 @@ import { auth } from "@/lib/auth";
 import { ddbDocClient, tableName } from "@/lib/dynamodb";
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
 
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+
 export async function GET() {
   try {
     const session = await auth();
@@ -49,7 +52,11 @@ export async function GET() {
 
     parsedItems.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-    return NextResponse.json({ items: parsedItems });
+    const response = NextResponse.json({ items: parsedItems });
+    response.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    response.headers.set("Pragma", "no-cache");
+    response.headers.set("Surrogate-Control", "no-store");
+    return response;
   } catch (error: any) {
     console.error("[history/list] Error:", error.message);
     return NextResponse.json({ error: error.message || "Failed to list history" }, { status: 500 });

@@ -3,6 +3,9 @@ import { auth } from "@/lib/auth";
 import { ddbDocClient } from "@/lib/dynamodb";
 import { ScanCommand } from "@aws-sdk/lib-dynamodb";
 
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+
 export async function GET() {
   try {
     const session = await auth();
@@ -69,7 +72,7 @@ export async function GET() {
       };
     }
 
-    return NextResponse.json({
+    const response = NextResponse.json({
       users,
       stats: {
         totalUsers: users.length,
@@ -78,6 +81,10 @@ export async function GET() {
         mostActiveUser,
       },
     });
+    response.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    response.headers.set("Pragma", "no-cache");
+    response.headers.set("Surrogate-Control", "no-store");
+    return response;
   } catch (error: any) {
     if (
       error.name === "ResourceNotFoundException" ||
