@@ -111,9 +111,14 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       return true;
     },
 
-    async jwt({ token, user }) {
-      // Only runs on sign-in when `user` is populated — binds identity to the token
+    async jwt({ token, user, account, profile }) {
       if (user) {
+        console.log(
+          "[jwt] CALLBACK ts:", Date.now(),
+          "| user.email:", user.email,
+          "| account.provider:", account?.provider,
+          "| profile.email:", (profile as any)?.email
+        );
         token.id = (user.email ?? "").toLowerCase().trim();
         token.name = user.name;
         token.email = user.email;
