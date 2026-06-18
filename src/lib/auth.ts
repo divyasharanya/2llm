@@ -4,17 +4,13 @@ import Credentials from "next-auth/providers/credentials";
 import { ddbDocClient } from "@/lib/dynamodb";
 import { GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import bcrypt from "bcryptjs";
+import { cookies } from "next/headers";
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
   providers: [
     Google({
       clientId: process.env.GOOGLE_CLIENT_ID!,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
-      authorization: {
-        params: {
-          prompt: "select_account",
-        },
-      },
     }),
     Credentials({
       name: "Credentials",
@@ -68,11 +64,65 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
   },
   callbacks: {
     async signIn({ user, account }) {
-      const now = new Date().toISOString();
+      console.log(
+        "[auth:signIn] Callback triggered. Provider:",
+        account?.provider,
+        "| Email:",
+        user?.email
+      );
 
+      // ── Google OAuth intent enforcement ──────────────────────────────────
+      // The login and signup pages each set a short-lived cookie
+      // ("auth-intent=login" or "auth-intent=signup") immediately before
+      // calling signIn("google"). We read that cookie here to decide whether
+      // to allow or block the OAuth completion.
       if (account?.provider === "google" && user.email) {
+        const userId = user.email.toLowerCase().trim();
+        const now = new Date().toISOString();
+
+        // Read the intent cookie set by the page
+        let intent: string | undefined;
         try {
-          const userId = user.email.toLowerCase().trim();
+          const cookieStore = await cookies();
+          intent = cookieStore.get("auth-intent")?.value;
+        } catch {
+          // If cookies() is unavailable (e.g. older Next.js), default to no enforcement
+          intent = undefined;
+        }
+
+        console.log("[auth:signIn] Google OAuth intent:", intent, "| userId:", userId);
+
+        // Check whether this email already has a record in Users table
+        let userExists = false;
+        try {
+          const existing = await ddbDocClient.send(
+            new GetCommand({ TableName: "Users", Key: { userId } })
+          );
+          userExists = !!existing.Item;
+        } catch (err: any) {
+          // If the table doesn't exist yet, treat as non-existing user
+          console.error("[auth:signIn] Error checking Users table:", err.message);
+          userExists = false;
+        }
+
+        console.log("[auth:signIn] userExists:", userExists);
+
+        // ── SIGNUP intent: block if account already exists ────────────────
+        if (intent === "signup" && userExists) {
+          console.log("[auth:signIn] BLOCKING signup — account already exists for:", userId);
+          // Redirect back to login with an error param
+          return "/login?error=AccountExists";
+        }
+
+        // ── LOGIN intent: block if account does NOT exist ─────────────────
+        if (intent === "login" && !userExists) {
+          console.log("[auth:signIn] BLOCKING login — no account found for:", userId);
+          // Redirect back to signup with an error param
+          return "/signup?error=NoAccount";
+        }
+
+        // ── Allowed: write / update the Users table ───────────────────────
+        try {
           await ddbDocClient.send(
             new UpdateCommand({
               TableName: "Users",
@@ -81,7 +131,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
                 "SET email = :email, #name = :name, image = :image, authProvider = :provider, lastLoginAt = :now, firstLoginAt = if_not_exists(firstLoginAt, :now)",
               ExpressionAttributeNames: { "#name": "name" },
               ExpressionAttributeValues: {
-                ":email": user.email.toLowerCase().trim(),
+                ":email": userId,
                 ":name": user.name || "",
                 ":image": user.image || "",
                 ":provider": "google",
@@ -89,12 +139,20 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
               },
             })
           );
-        } catch (error: any) {
-          console.error("[signIn] Failed to sync Google user to DynamoDB:", error.message);
+          console.log("[auth:signIn] Users table updated for Google user:", userId);
+        } catch (err: any) {
+          console.error("[auth:signIn] Error writing to Users table:", err.message);
+          // Don't block login just because the write failed
         }
-      } else if (account?.provider === "credentials" && user.email) {
+
+        return true;
+      }
+
+      // ── Credentials login: update lastLoginAt ────────────────────────────
+      if (account?.provider === "credentials" && user.email) {
         try {
           const userId = user.email.toLowerCase().trim();
+          const now = new Date().toISOString();
           await ddbDocClient.send(
             new UpdateCommand({
               TableName: "Users",
@@ -103,41 +161,31 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
               ExpressionAttributeValues: { ":now": now },
             })
           );
-        } catch (error: any) {
-          console.error("[signIn] Failed to update lastLoginAt for credentials user:", error.message);
+          console.log("[auth:signIn] lastLoginAt updated for credentials user:", userId);
+        } catch (err: any) {
+          console.error("[auth:signIn] Error updating lastLoginAt:", err.message);
         }
       }
 
       return true;
     },
 
-    async jwt({ token, user, account, profile }) {
-      if (user) {
-        console.log(
-          "[jwt] CALLBACK ts:", Date.now(),
-          "| user.email:", user.email,
-          "| account.provider:", account?.provider,
-          "| profile.email:", (profile as any)?.email
-        );
-        token.id = (user.email ?? "").toLowerCase().trim();
-        token.name = user.name;
-        token.email = user.email;
-        token.picture = user.image;
+    async jwt({ token, user }) {
+      if (user && user.email) {
+        token.id = user.email.toLowerCase().trim();
       }
       return token;
     },
 
     async session({ session, token }) {
-      // Always derive session identity from the JWT token, never from stale session.user
-      session.user.name = token.name as string;
-      session.user.email = token.email as string;
-      session.user.image = token.picture as string;
-      (session.user as any).id = token.id;
-      (session.user as any).isAdmin =
-        !!token.email &&
-        !!process.env.ADMIN_EMAIL &&
-        (token.email as string).toLowerCase().trim() ===
-          process.env.ADMIN_EMAIL.toLowerCase().trim();
+      if (session.user) {
+        (session.user as any).id = token.id;
+        (session.user as any).isAdmin =
+          session.user.email &&
+          process.env.ADMIN_EMAIL &&
+          session.user.email.toLowerCase().trim() ===
+            process.env.ADMIN_EMAIL.toLowerCase().trim();
+      }
       return session;
     },
   },
