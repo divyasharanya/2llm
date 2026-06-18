@@ -18,6 +18,11 @@ export default function Dashboard() {
   const [statsLoading, setStatsLoading] = useState(true);
 
   useEffect(() => {
+    console.log("RAW SESSION OBJECT:", JSON.stringify(session, null, 2));
+    console.log("SESSION STATUS:", status);
+  }, [session, status]);
+
+  useEffect(() => {
     if (status === "unauthenticated") {
       router.push("/login");
     }
