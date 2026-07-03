@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import SyntaxHighlighter from "react-syntax-highlighter/dist/esm/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
+import DocumentUpload, { RagChunk, retrieveRagContext, formatRagContext } from "@/components/DocumentUpload";
 
 interface Issue {
   file: string;
@@ -64,6 +65,13 @@ export default function CodeReviewClient() {
 
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+
+  // ── RAG state ────────────────────────────────────────────────────────────────
+  const [ragDocumentId, setRagDocumentId] = useState<string | null>(null);
+  const [ragFileName, setRagFileName] = useState("");
+  const [ragChunkCount, setRagChunkCount] = useState(0);
+  const [ragSourceChunks, setRagSourceChunks] = useState<RagChunk[]>([]);
+  const [showRagSources, setShowRagSources] = useState(false);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -152,10 +160,25 @@ export default function CodeReviewClient() {
     setIssues([]);
     setScore(0);
     setStep(1);
+    setRagSourceChunks([]);
+    setShowRagSources(false);
 
-    // Step 1: Gemini analysis
+    // ── Optionally fetch RAG context ─────────────────────────────────
+    let specContext = "";
+    let specChunks: RagChunk[] = [];
+    if (ragDocumentId) {
+      const query = `${detectedLang} code requirements specifications bugs quality`;
+      specChunks = await retrieveRagContext(ragDocumentId, query, 3);
+      specContext = formatRagContext(specChunks);
+      setRagSourceChunks(specChunks);
+    }
+
+    // ── Step 1: Gemini analysis ────────────────────────────────────
+    const specInstruction = ragDocumentId
+      ? `${specContext}\nAlso check if the code fulfils the requirements above. Flag any missing requirements as severity CRITICAL with description starting with [MISSING FEATURE].`
+      : "";
     const geminiResp = await callGemini(
-      `Return ONLY a JSON array of issues. Each item: {"file":"filename","line":1,"severity":"CRITICAL|WARNING|SUGGESTION","description":"clear description"}. If no issues return []. Code:\n${input}`
+      `Return ONLY a JSON array of issues. Each item: {"file":"filename","line":1,"severity":"CRITICAL|WARNING|SUGGESTION","description":"clear description"}. If no issues return [].${specInstruction}\nCode:\n${input}`
     ).catch(() => "");
     setGeminiInfo(geminiResp);
     setStep(2);
@@ -181,11 +204,14 @@ export default function CodeReviewClient() {
     } catch { /* ignore */ }
     setIssues(parsedIssues);
 
-    // Step 2: LLaMA fix
+    // ── Step 2: LLaMA fix ──────────────────────────────────────────
     let llamaResp = "";
     try {
+      const fixInstruction = ragDocumentId
+        ? `${specContext}\nFix ALL bugs AND ensure the fixed code matches the requirements/specs from the document above.`
+        : "Fix ALL bugs in the code below.";
       llamaResp = await callGroq(
-        `You are a code fixer. Fix ALL bugs in the code below. Return ONLY the fixed code in a markdown code block. Do not add docstrings or restructure working code. Only fix actual bugs.\n\n${input}`
+        `You are a code fixer. ${fixInstruction} Return ONLY the fixed code in a markdown code block. Do not add docstrings or restructure working code. Only fix actual bugs.\n\n${input}`
       );
     } catch { /* ignore */ }
     const fixedMatch = llamaResp.match(/```[\w]*\n([\s\S]*?)\n```/);
@@ -454,6 +480,23 @@ export default function CodeReviewClient() {
             ))}
           </div>
 
+          {/* ── RAG Document Upload ───────────────────────────────────── */}
+          <DocumentUpload
+            label="Upload Documentation / Specs"
+            onDocumentReady={(docId, fileName, chunkCount) => {
+              setRagDocumentId(docId);
+              setRagFileName(fileName);
+              setRagChunkCount(chunkCount);
+            }}
+            onClear={() => {
+              setRagDocumentId(null);
+              setRagFileName("");
+              setRagChunkCount(0);
+              setRagSourceChunks([]);
+            }}
+            disabled={isReviewing}
+          />
+
           {/* Textarea */}
           <div className={`relative rounded-2xl overflow-hidden border-2 transition-all ${
             isReviewing ? "pulse-border-active border-purple-500/40" : "border-purple-500/20 hover:border-purple-500/40"
@@ -512,9 +555,16 @@ export default function CodeReviewClient() {
 
               {/* Gemini — Bug Scanner */}
               <div className="bg-[#141414] rounded-2xl p-5 border-l-4 border-cyan-500 shadow-[0_0_15px_rgba(6,182,212,0.05)]">
-                <div className="flex items-center gap-2 mb-4">
-                  <span className="text-xl">🤖</span>
-                  <h3 className="text-cyan-400 font-bold text-sm uppercase tracking-wider">Gemini — Bug Scanner</h3>
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl">🤖</span>
+                    <h3 className="text-cyan-400 font-bold text-sm uppercase tracking-wider">Gemini — Bug Scanner</h3>
+                  </div>
+                  {ragDocumentId && issues.length > 0 && (
+                    <span className="text-[9px] bg-purple-500/15 text-purple-400 border border-purple-500/20 px-2 py-0.5 rounded-full">
+                      📋 Reviewed against specs
+                    </span>
+                  )}
                 </div>
 
                 {issues.length === 0 ? (
@@ -545,6 +595,31 @@ export default function CodeReviewClient() {
                         </div>
                       );
                     })}
+                  </div>
+                )}
+
+                {/* RAG spec sources panel */}
+                {ragSourceChunks.length > 0 && (
+                  <div className="mt-4 border-t border-cyan-500/10 pt-4">
+                    <button
+                      onClick={() => setShowRagSources(v => !v)}
+                      className="flex items-center gap-2 text-[10px] text-purple-400/70 hover:text-purple-400 transition-colors mb-2"
+                    >
+                      📚 {ragSourceChunks.length} spec excerpts used in review {showRagSources ? "▲" : "▼"}
+                    </button>
+                    {showRagSources && (
+                      <div className="space-y-2">
+                        {ragSourceChunks.map((chunk, ci) => (
+                          <div key={ci} className="bg-[#0D0D0D] rounded-lg p-2.5 border border-purple-500/10">
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-[9px] text-purple-400 font-semibold">Spec Excerpt {ci + 1}</span>
+                              <span className="text-[9px] text-gray-600">{(chunk.score * 100).toFixed(0)}% relevant</span>
+                            </div>
+                            <p className="text-[10px] text-gray-400 leading-relaxed line-clamp-3">{chunk.text}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

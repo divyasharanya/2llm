@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import jsPDF from "jspdf";
+import DocumentUpload, { RagChunk, retrieveRagContext, formatRagContext } from "@/components/DocumentUpload";
 
 interface Argument {
   round: number;
@@ -83,6 +84,15 @@ export default function DebateClient() {
   const [step, setStep] = useState(0); // 0=idle,1=gemini,2=llama,3=verdict
   const [shareMsg, setShareMsg] = useState(false);
 
+  // ── RAG state ────────────────────────────────────────────────────────────────
+  const [ragDocumentId, setRagDocumentId] = useState<string | null>(null);
+  const [ragFileName, setRagFileName] = useState("");
+  const [ragChunkCount, setRagChunkCount] = useState(0);
+  // per-round sources: map of round number -> chunks for FOR and AGAINST
+  const [ragForSources, setRagForSources] = useState<Record<number, RagChunk[]>>({});
+  const [ragAgainstSources, setRagAgainstSources] = useState<Record<number, RagChunk[]>>({});
+  const [openSourcePanel, setOpenSourcePanel] = useState<string | null>(null); // "for-1", "against-2" etc.
+
   const [debateHistory, setDebateHistory] = useState<DebateSave[]>([]);
 
   const [debateStats, setDebateStats] = useState<DebateStats>({ totalDebates: 0, totalRounds: 0, forWins: 0, againstWins: 0, categoryCounts: {} });
@@ -138,6 +148,18 @@ export default function DebateClient() {
   }, []);
 
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+  // ── RAG context retrieval ─────────────────────────────────────────────────
+  const getContext = async (query: string, topK = 5): Promise<string> => {
+    if (!ragDocumentId) return "";
+    const chunks = await retrieveRagContext(ragDocumentId, query, topK);
+    return formatRagContext(chunks);
+  };
+
+  const getContextChunks = async (query: string, topK = 5): Promise<RagChunk[]> => {
+    if (!ragDocumentId) return [];
+    return retrieveRagContext(ragDocumentId, query, topK);
+  };
 
   const callGemini = async (prompt: string, retries = 3): Promise<string> => {
     for (let attempt = 0; attempt < retries; attempt++) {
@@ -197,22 +219,38 @@ export default function DebateClient() {
       // Gemini — FOR
       setTyping("for");
       setStep(1);
+      const forQuery = `${topic} — arguments in favour, benefits, positive case`;
+      const [forContext, forChunks] = await Promise.all([
+        getContext(forQuery),
+        getContextChunks(forQuery),
+      ]);
       const forResp = await callGemini(
-        `You are debating FOR the following topic. Give 2-3 strong, specific arguments in ${language}. Be concise and convincing. Max 150 words.\nTopic: "${topic}"\nRound ${i} of ${rounds}.`
+        `You are debating FOR the following topic. Give 2-3 strong, specific arguments in ${language}. Be concise and convincing. Max 150 words.${forContext}\nTopic: "${topic}"\nRound ${i} of ${rounds}.${
+          ragDocumentId ? "\nYou MUST reference at least one fact or quote from the document context above, citing as [Doc]." : ""
+        }`
       ).catch(() => "Could not generate argument.");
       const newFor: Argument = { round: i, text: forResp, wordCount: forResp.split(/\s+/).length };
       localFor.push(newFor);
       setForArguments(prev => [...prev, newFor]);
+      if (forChunks.length > 0) setRagForSources(prev => ({ ...prev, [i]: forChunks }));
 
       // LLaMA — AGAINST
       setTyping("against");
       setStep(2);
+      const againstQuery = `${topic} — arguments against, risks, negative case, counter-arguments`;
+      const [againstContext, againstChunks] = await Promise.all([
+        getContext(againstQuery),
+        getContextChunks(againstQuery),
+      ]);
       const againstResp = await callGroq(
-        `You are debating AGAINST the following topic. Directly rebut the FOR side and give strong counter-arguments in ${language}. Be concise and direct. Max 150 words.\nTopic: "${topic}"\nRound ${i} of ${rounds}.`
+        `You are debating AGAINST the following topic. Directly rebut the FOR side and give strong counter-arguments in ${language}. Be concise and direct. Max 150 words.${againstContext}\nTopic: "${topic}"\nRound ${i} of ${rounds}.${
+          ragDocumentId ? "\nYou MUST reference at least one fact or quote from the document context above, citing as [Doc]." : ""
+        }`
       ).catch(() => "Could not generate argument.");
       const newAgainst: Argument = { round: i, text: againstResp, wordCount: againstResp.split(/\s+/).length };
       localAgainst.push(newAgainst);
       setAgainstArguments(prev => [...prev, newAgainst]);
+      if (againstChunks.length > 0) setRagAgainstSources(prev => ({ ...prev, [i]: againstChunks }));
     }
 
     setTyping(null);
@@ -372,6 +410,9 @@ export default function DebateClient() {
     setDebateComplete(false);
     setCurrentRound(0);
     setStep(0);
+    setRagForSources({});
+    setRagAgainstSources({});
+    setOpenSourcePanel(null);
   };
 
   const topCategory = Object.entries(debateStats.categoryCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "—";
@@ -527,6 +568,24 @@ export default function DebateClient() {
             </div>
           </div>
 
+          {/* ── RAG Document Upload ───────────────────────────────────── */}
+          <DocumentUpload
+            label="Upload Research Document"
+            onDocumentReady={(docId, fileName, chunkCount) => {
+              setRagDocumentId(docId);
+              setRagFileName(fileName);
+              setRagChunkCount(chunkCount);
+            }}
+            onClear={() => {
+              setRagDocumentId(null);
+              setRagFileName("");
+              setRagChunkCount(0);
+              setRagForSources({});
+              setRagAgainstSources({});
+            }}
+            disabled={isDebating}
+          />
+
           {/* Topic Input */}
           <div className="flex flex-col gap-3">
             <input
@@ -665,9 +724,14 @@ export default function DebateClient() {
                       <p className="text-[10px] text-gray-600">Gemini</p>
                     </div>
                   </div>
-                  {forArguments.length > 0 && (
-                    <span className="text-[10px] text-gray-600">{forArguments[forArguments.length-1]?.wordCount || 0} words</span>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {ragDocumentId && forArguments.length > 0 && (
+                      <span className="text-[9px] bg-purple-500/15 text-purple-400 border border-purple-500/20 px-2 py-0.5 rounded-full">📄 Grounded</span>
+                    )}
+                    {forArguments.length > 0 && (
+                      <span className="text-[10px] text-gray-600">{forArguments[forArguments.length-1]?.wordCount || 0} words</span>
+                    )}
+                  </div>
                 </div>
                 {typing === "for" ? (
                   <div className="flex items-center gap-3 py-8 justify-center">
@@ -679,8 +743,32 @@ export default function DebateClient() {
                   <div className="space-y-3">
                     {forArguments.map((arg) => (
                       <div key={arg.round} className="slide-in p-3.5 rounded-xl border-l-4 border-cyan-500 bg-cyan-950/10">
-                        <div className="text-[10px] text-cyan-600 font-bold uppercase tracking-wider mb-1.5">Round {arg.round}</div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-[10px] text-cyan-600 font-bold uppercase tracking-wider">Round {arg.round}</span>
+                          {ragForSources[arg.round]?.length > 0 && (
+                            <button
+                              onClick={() => setOpenSourcePanel(openSourcePanel === `for-${arg.round}` ? null : `for-${arg.round}`)}
+                              className="text-[9px] text-purple-400/70 hover:text-purple-400 transition-colors flex items-center gap-1"
+                            >
+                              📚 {ragForSources[arg.round].length} sources {openSourcePanel === `for-${arg.round}` ? "▲" : "▼"}
+                            </button>
+                          )}
+                        </div>
                         <p className="text-gray-300 text-sm leading-relaxed">{arg.text}</p>
+                        {openSourcePanel === `for-${arg.round}` && ragForSources[arg.round] && (
+                          <div className="mt-3 space-y-2 border-t border-cyan-500/10 pt-3">
+                            <p className="text-[9px] text-gray-600 uppercase tracking-wider">Retrieved document sources</p>
+                            {ragForSources[arg.round].map((chunk, ci) => (
+                              <div key={ci} className="bg-[#0D0D0D] rounded-lg p-2.5 border border-purple-500/10">
+                                <div className="flex items-center justify-between mb-1">
+                                  <span className="text-[9px] text-purple-400 font-semibold">Excerpt {ci + 1}</span>
+                                  <span className="text-[9px] text-gray-600">{(chunk.score * 100).toFixed(0)}% relevant</span>
+                                </div>
+                                <p className="text-[10px] text-gray-400 leading-relaxed line-clamp-3">{chunk.text}</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -697,9 +785,14 @@ export default function DebateClient() {
                       <p className="text-[10px] text-gray-600">LLaMA</p>
                     </div>
                   </div>
-                  {againstArguments.length > 0 && (
-                    <span className="text-[10px] text-gray-600">{againstArguments[againstArguments.length-1]?.wordCount || 0} words</span>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {ragDocumentId && againstArguments.length > 0 && (
+                      <span className="text-[9px] bg-purple-500/15 text-purple-400 border border-purple-500/20 px-2 py-0.5 rounded-full">📄 Grounded</span>
+                    )}
+                    {againstArguments.length > 0 && (
+                      <span className="text-[10px] text-gray-600">{againstArguments[againstArguments.length-1]?.wordCount || 0} words</span>
+                    )}
+                  </div>
                 </div>
                 {typing === "against" ? (
                   <div className="flex items-center gap-3 py-8 justify-center">
@@ -711,8 +804,32 @@ export default function DebateClient() {
                   <div className="space-y-3">
                     {againstArguments.map((arg) => (
                       <div key={arg.round} className="slide-in p-3.5 rounded-xl border-l-4 border-orange-500 bg-orange-950/10">
-                        <div className="text-[10px] text-orange-600 font-bold uppercase tracking-wider mb-1.5">Round {arg.round}</div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-[10px] text-orange-600 font-bold uppercase tracking-wider">Round {arg.round}</span>
+                          {ragAgainstSources[arg.round]?.length > 0 && (
+                            <button
+                              onClick={() => setOpenSourcePanel(openSourcePanel === `against-${arg.round}` ? null : `against-${arg.round}`)}
+                              className="text-[9px] text-purple-400/70 hover:text-purple-400 transition-colors flex items-center gap-1"
+                            >
+                              📚 {ragAgainstSources[arg.round].length} sources {openSourcePanel === `against-${arg.round}` ? "▲" : "▼"}
+                            </button>
+                          )}
+                        </div>
                         <p className="text-gray-300 text-sm leading-relaxed">{arg.text}</p>
+                        {openSourcePanel === `against-${arg.round}` && ragAgainstSources[arg.round] && (
+                          <div className="mt-3 space-y-2 border-t border-orange-500/10 pt-3">
+                            <p className="text-[9px] text-gray-600 uppercase tracking-wider">Retrieved document sources</p>
+                            {ragAgainstSources[arg.round].map((chunk, ci) => (
+                              <div key={ci} className="bg-[#0D0D0D] rounded-lg p-2.5 border border-purple-500/10">
+                                <div className="flex items-center justify-between mb-1">
+                                  <span className="text-[9px] text-purple-400 font-semibold">Excerpt {ci + 1}</span>
+                                  <span className="text-[9px] text-gray-600">{(chunk.score * 100).toFixed(0)}% relevant</span>
+                                </div>
+                                <p className="text-[10px] text-gray-400 leading-relaxed line-clamp-3">{chunk.text}</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
